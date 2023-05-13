@@ -1,8 +1,10 @@
 from typing import TypedDict
 
+
 class AddressData(TypedDict):
     ip: str
     port: int
+
 
 class Address(dict):
     def __init__(self, ip: str, port: int):
