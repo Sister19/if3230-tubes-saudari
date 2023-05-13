@@ -11,6 +11,8 @@ from msgs.BaseMsg import BaseMsg
 from msgs.HeartbeatMsg import HeartbeatResp
 from msgs.ExecuteMsg import ExecuteReq, ExecuteResp
 from utils.MsgParser import MsgParser
+from structs.Log import Log
+from msgs.VoteMsg import VoteReq, VoteResp
 
 class RaftNode:
     HEARTBEAT_INTERVAL = 1
@@ -25,22 +27,97 @@ class RaftNode:
 
     class FuncRPC(Enum):
         APPLY_MEMBERSHIP = "apply_membership"
+        VOTE_LEADER = "vote_leader"
 
     def __init__(self, application: Any, addr: Address, contact_addr: Address = None):
         socket.setdefaulttimeout(RaftNode.RPC_TIMEOUT)
         self.address:             Address = addr
-        self.type:                RaftNode.NodeType = RaftNode.NodeType.FOLLOWER
-        self.log:                 List[str] = []
         self.app:                 Any = application
-        self.election_term:       int = 0
+
+        # stable storage vars
+        self.__try_fetch_stable()
+
+        # volatile vars
+        self.__init_volatile()
+
+        # additional vars
         self.cluster_addr_list:   List[Address] = []
-        self.cluster_leader_addr: Address = None
         self.msg_parser: MsgParser = MsgParser()
+
         if contact_addr is None:
             self.cluster_addr_list.append(self.address)
             self.__initialize_as_leader()
         else:
             self.__try_to_apply_membership(contact_addr)
+
+    def __on_recover_crash(self):
+        self.__try_fetch_stable()
+        self.__init_volatile()
+
+    def __try_fetch_stable(self):
+        # TODO: get stable storage
+        # if exist persistence, get persistence, return
+
+        self.__init_stable()
+
+    def __init_stable(self):
+        self.election_term:       int = 0
+        self.voted_for: Address     = None # TODO: add type
+        self.log:                 List[Log] = []
+        self.commit_length: int = 0
+
+    def __init_volatile(self):
+        self.type:                RaftNode.NodeType = RaftNode.NodeType.FOLLOWER
+        self.cluster_leader_addr: Address = None
+        self.votes_received: List[Address] = []
+        self.sent_length = []
+        self.acked_length = []
+
+    def vote_leader(self):
+        self.election_term += 1
+        self.type = RaftNode.NodeType.CANDIDATE
+        self.voted_for = self.address
+        self.votes_received = [self.address]
+        
+        last_term = 0
+        if len(self.log) > 0:
+            last_term = self.log[-1]["term"]
+        
+        msg = VoteReq({
+            'voted_for': self.voted_for, 
+            'term': self.election_term,
+            'log_length': len(self.log),
+            'last_term': last_term,
+        })
+
+        for i in range(len(self.cluster_addr_list)):
+            addr = self.cluster_addr_list[i]
+            self.__try_request_vote(
+                addr, msg
+            )
+            # TODO: start timer
+        
+
+    def __try_request_vote(self, addr_dest: Address, msg: VoteReq):
+        redirected_addr = addr_dest
+        response = VoteResp({
+            'status': "redirected",
+            "address": addr_dest,
+        })
+
+        while response["status"] != "success":
+            redirected_addr = Address(
+                response["address"]["ip"],
+                response["address"]["port"],
+            )
+            print(f"sending msg: {msg}")
+            response: VoteResp = self.__send_request(
+                msg,
+                RaftNode.FuncRPC.VOTE_LEADER.value,
+                redirected_addr
+            )
+        
+        # TODO: handle response
 
     # Internal Raft Node methods
 
