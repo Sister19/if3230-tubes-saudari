@@ -8,7 +8,7 @@ import socket
 import time
 from msgs.ApplyMembershipMsg import ApplyMembershipReq, ApplyMembershipResp
 from msgs.BaseMsg import BaseMsg
-from msgs.HeartbeatMsg import HeartbeatResp
+from msgs.HeartbeatMsg import HeartbeatResp, HeartbeatRespType, HeartbeatReq
 from msgs.ExecuteMsg import ExecuteReq, ExecuteResp
 from utils.MsgParser import MsgParser
 from structs.Log import Log
@@ -47,7 +47,7 @@ class RPCHandler:
                 response["address"]["ip"],
                 response["address"]["port"],
             )
-            response = self.__call(redirect_addr, rpc_name, msg)
+            response = self.msg_parser.deserialize(self.__call(redirect_addr, rpc_name, msg))
         
         # TODO: handle fail response
         if response["status"] == RespStatus.FAILED.value:
@@ -72,6 +72,7 @@ class RaftNode:
     class FuncRPC(Enum):
         APPLY_MEMBERSHIP = "apply_membership"
         REQUEST_VOTE = "request_vote"
+        HEARTBEAT = "heartbeat"
 
     # Heeh, semua yang diatas dari komen ini
 
@@ -96,6 +97,8 @@ class RaftNode:
             self.__initialize_as_leader()
         else:
             self.__try_to_apply_membership(contact_addr)
+        
+        self.__init_heartbeat()
 
     def __on_recover_crash(self):
         self.__try_fetch_stable()
@@ -213,23 +216,60 @@ class RaftNode:
     def __print_log(self, text: str): # FIXME: Plis jangan print_log gua kira ngeprint isi log
         print(f"[{self.address}] [{time.strftime('%H:%M:%S')}] {text}")
 
-    def __initialize_as_leader(self):
-        self.__print_log("Initialize as leader node...")
-        self.cluster_leader_addr = self.address # FIXME: cluster_leader_addr = voted_for? ato beda? bisa disamain kok
-        self.type = RaftNode.NodeType.LEADER
-        request = {
-            "cluster_leader_addr": self.address
-        }
+    def __init_heartbeat(self):
         # TODO : Inform to all node this is new leader
         self.heartbeat_thread = Thread(target=asyncio.run, args=[ #FIXME: berarti klo bukan leader, thread loopnya beda lagi?
                                        self.__leader_heartbeat()])
         self.heartbeat_thread.start()
 
+    def __initialize_as_leader(self):
+        self.__print_log("Initialize as leader node...")
+        self.cluster_leader_addr = self.address # FIXME: cluster_leader_addr = voted_for? ato beda? bisa disamain kok
+        self.type = RaftNode.NodeType.LEADER
+        # request = {
+        #     "cluster_leader_addr": self.address
+        # }
+        # # TODO : Inform to all node this is new leader
+        # self.heartbeat_thread = Thread(target=asyncio.run, args=[ #FIXME: berarti klo bukan leader, thread loopnya beda lagi?
+        #                                self.__leader_heartbeat()])
+        # self.heartbeat_thread.start()
+
     async def __leader_heartbeat(self):
         # TODO : Send periodic heartbeat
         while True:
-            self.__print_log("[Leader] Sending heartbeat...")
-            pass # FIXME: WHaat?
+            if self.type == RaftNode.NodeType.LEADER:
+                self.__print_log("[Leader] Sending heartbeat...")
+                pass # FIXME: WHaat?
+
+                # TODO : Send heartbeat to all node
+                for i in range(len(self.cluster_addr_list)):
+                    if self.cluster_addr_list[i] == self.address:
+                        continue
+
+                    addr = self.cluster_addr_list[i]
+
+                    # TODO: calc prefix len
+                    prefix_len = 0
+                    suffix = self.log[prefix_len:]
+                    prefix_term = 0
+                    if prefix_len > 0:
+                        prefix_term = self.log[prefix_len - 1].term
+
+                    msg = HeartbeatReq({
+                        "leader_addr": self.address,
+                        "term": self.election_term,
+                        "prefix_len": prefix_len,
+                        "prefix_term": prefix_term,
+                        "suffix": suffix,
+                        "commit_length": self.commit_length,
+                    })
+                    
+                    self.rpc_handler.request(
+                        addr,
+                        RaftNode.FuncRPC.HEARTBEAT.value,
+                        msg,
+                    )
+
             await asyncio.sleep(RaftNode.HEARTBEAT_INTERVAL)
 
     def __try_to_apply_membership(self, contact_addr: Address):
@@ -247,7 +287,13 @@ class RaftNode:
     # Inter-node RPCs
     def heartbeat(self, json_request: str) -> str:
         # TODO : Implement heartbeat, reappend log baru dan check commitnya juga
+        request = self.msg_parser.deserialize(json_request)
+        self.__print_log(f"Request : {request}")
+
+        # TODO: handle request
+
         response = HeartbeatResp({
+            'status':RespStatus.SUCCESS.value,
             "heartbeat_response": "ack",
             "address":            self.address,
         })
