@@ -13,6 +13,49 @@ from msgs.ExecuteMsg import ExecuteReq, ExecuteResp
 from utils.MsgParser import MsgParser
 from structs.Log import Log
 from msgs.VoteMsg import VoteReq, VoteResp
+from msgs.BaseMsg import BaseReq, BaseResp, RespStatus
+
+class RPCHandler:
+    def __init__(self):
+        self.msg_parser = MsgParser()
+
+    def __call(self, addr: Address, rpc_name: str, msg: BaseMsg):
+        node = ServerProxy(f"http://{addr.ip}:{addr.port}")
+        json_request = self.msg_parser.serialize(msg)
+        print(f"Sending request to {addr.ip}:{addr.port}...")
+        rpc_function = getattr(node, rpc_name)
+
+        try:
+            response = rpc_function(json_request)
+            print(f"Response from {addr.ip}:{addr.port}: {response}")
+            return response
+        except Exception as e:
+            print(f"Error while sending request to {addr.ip}:{addr.port}: {e}")
+            return BaseResp({
+                'status': RespStatus.FAILED.value,
+            })
+    
+    def request(self, addr: Address, rpc_name: str, msg: BaseMsg):
+        redirect_addr = addr
+        response = BaseResp({
+            'status': RespStatus.REDIRECTED.value,
+            'address': redirect_addr,
+        })
+
+        while response["status"] == RespStatus.REDIRECTED.value:
+            redirect_addr = Address(
+                response["address"]["ip"],
+                response["address"]["port"],
+            )
+            response = self.__call(redirect_addr, rpc_name, msg)
+        
+        # TODO: handle fail response
+        if response["status"] == RespStatus.FAILED.value:
+            print("Failed to send request")
+            exit(1)
+
+        response["address"] = redirect_addr
+        return response
 
 class RaftNode:
     # FIXME: knp di dalem class? mending taro luar biar bisa dipake
@@ -28,7 +71,7 @@ class RaftNode:
 
     class FuncRPC(Enum):
         APPLY_MEMBERSHIP = "apply_membership"
-        VOTE_LEADER = "vote_leader"
+        REQUEST_VOTE = "request_vote"
 
     # Heeh, semua yang diatas dari komen ini
 
@@ -46,6 +89,7 @@ class RaftNode:
         # additional vars
         self.cluster_addr_list:   List[Address] = [] # FIXME: Lebih baik dijadiin struct ajah, daripada bergantung dengan index, karena di join sama data last sent
         self.msg_parser: MsgParser = MsgParser()
+        self.rpc_handler: RPCHandler = RPCHandler()
 
         if contact_addr is None:
             self.cluster_addr_list.append(self.address)
@@ -64,6 +108,7 @@ class RaftNode:
         self.__init_stable()
 
     def __init_stable(self):
+        # TODO: store in stable storage
         self.election_term:       int = 0
         self.voted_for: Address     = None # TODO: add type, #QUESTIONABLE: hah ngapain dia voted ke selain candidate?
         self.log:                 List[Log] = []
@@ -97,33 +142,72 @@ class RaftNode:
 
         for i in range(len(self.cluster_addr_list)):
             addr = self.cluster_addr_list[i]
-            self.__try_request_vote(
-                addr, msg
-            )
-            # TODO: start timer
+            # TODO: make sure async
+            asyncio.create_task(self.__try_request_vote(addr, msg))
+
+        # TODO: start timer
         # TODO: pindahin start timer ke sini
 
-    def __try_request_vote(self, addr_dest: Address, msg: VoteReq):
-        redirected_addr = addr_dest
+    async def __try_request_vote(self, addr_dest: Address, msg: VoteReq):
+        response = self.rpc_handler.request(
+            addr_dest,
+            RaftNode.FuncRPC.REQUEST_VOTE.value,
+            msg,
+        )
+
+        voter_id = response["node_addr"]
+        voter_term = response["current_term"]
+        granted = response["granted"]
+
+        if self.type == RaftNode.NodeType.CANDIDATE and self.election_term == voter_term and granted:
+            self.votes_received.append(voter_id)
+            if len(self.votes_received) >= (len(self.cluster_addr_list) + 1) / 2:
+                self.__initialize_as_leader()
+                # TODO: cancel election timer
+                # TODO: replicate log for all cluster nodes
+        elif voter_term > self.election_term:
+            self.election_term = voter_term
+            self.type = RaftNode.NodeType.FOLLOWER
+            self.voted_for = None
+            # TODO: cancel election timer
+        
+    
+    def request_vote(self, json_request: str):
+        request: VoteReq = self.msg_parser.deserialize(json_request)
+        print(f"request vote: {request}")
+
+        cId = request["voted_for"]
+        cTerm = request["term"]
+        cLogLength = request["log_length"]
+        cLogTerm = request["last_term"]
+        
+        if cTerm > self.election_term:
+            self.election_term = cTerm
+            self.voted_for = None
+            self.type = RaftNode.NodeType.FOLLOWER
+        
+        last_term = 0
+        if len(self.log) > 0:
+            last_term = self.log[-1].term
+        
+        logOk = (cLogTerm > last_term) or (cLogTerm == last_term and cLogLength >= len(self.log))
+
         response = VoteResp({
-            'status': "redirected",
-            "address": addr_dest,
+            'status': "success",
+            'address': self.address,
+            'node_addr': self.address,
+            'current_term': self.election_term,            
         })
 
-        while response["status"] != "success": # FIXME: Recursive redirected gini seharusnya di bikin wrapper aja biar bisa dipake lagi
-            redirected_addr = Address(
-                response["address"]["ip"],
-                response["address"]["port"],
-            )
-            print(f"sending msg: {msg}")
-            response: VoteResp = self.__send_request(
-                msg,
-                RaftNode.FuncRPC.VOTE_LEADER.value,
-                redirected_addr
-            )
+        if (cTerm == self.election_term and logOk and (self.voted_for is None or self.voted_for == cId)):
+            self.voted_for = cId
+            response["vote_granted"] = True
+        else:
+            response["vote_granted"] = False
         
-        # TODO: handle response
-
+        print(f"response vote: {response}")
+        return self.msg_parser.serialize(response)
+        
     # Internal Raft Node methods
 
     def __print_log(self, text: str): # FIXME: Plis jangan print_log gua kira ngeprint isi log
@@ -149,33 +233,16 @@ class RaftNode:
             await asyncio.sleep(RaftNode.HEARTBEAT_INTERVAL)
 
     def __try_to_apply_membership(self, contact_addr: Address):
-        redirected_addr = contact_addr
-        response = ApplyMembershipResp({
-            "status": "redirected",
-            "address": contact_addr
-        })
-        while response["status"] != "success":
-            redirected_addr = Address(
-                response["address"]["ip"], response["address"]["port"])
-            msg = ApplyMembershipReq(self.address)
-            print(f"Sending msg : {msg}")
-            response: ApplyMembershipResp = self.__send_request(
-                msg, RaftNode.FuncRPC.APPLY_MEMBERSHIP.value, redirected_addr)
+        msg = ApplyMembershipReq(self.address)
+        print(f"Sending msg : {msg}")
+        response: ApplyMembershipResp = self.rpc_handler.request(
+            contact_addr, RaftNode.FuncRPC.APPLY_MEMBERSHIP.value, msg)
+        
+        # TODO: handle failed response
+
         self.log = response["log"]
         self.cluster_addr_list = response["cluster_addr_list"]
-        self.cluster_leader_addr = redirected_addr
-
-    def __send_request(self, request: BaseMsg, rpc_name: str, addr: Address) -> BaseMsg:
-        # Warning : This method is blocking
-        node = ServerProxy(f"http://{addr.ip}:{addr.port}")
-        json_request = self.msg_parser.serialize(request)
-        print(f"Sending request to {addr.ip}:{addr.port}...")
-        print(f"rpc_name : {rpc_name}")
-        rpc_function = getattr(node, rpc_name)
-        print(f"RPC function : {rpc_function}")
-        response = self.msg_parser.deserialize(rpc_function(json_request))
-        self.__print_log(response)
-        return response
+        self.cluster_leader_addr = response["address"]
 
     # Inter-node RPCs
     def heartbeat(self, json_request: str) -> str:

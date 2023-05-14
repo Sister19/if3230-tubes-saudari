@@ -1,17 +1,15 @@
-from msgs.BaseMsg import BaseMsg
+from msgs.BaseMsg import BaseReq, BaseResp
 from Address import Address
 from typing import Any, List
 
-class VoteReq(BaseMsg):
+class VoteReq(BaseReq):
   voted_for: Address
   term: int
   log_length: int
   last_term: int
 
 
-class VoteResp(BaseMsg):
-  status: str
-  address: Address
+class VoteResp(BaseResp):
   node_addr: Address
-  term: int
-  flag: bool
+  current_term: int
+  granted: bool

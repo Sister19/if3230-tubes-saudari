@@ -1,10 +1,10 @@
-from msgs.BaseMsg import BaseMsg
+from msgs.BaseMsg import BaseReq, BaseResp
 
-class ExecuteReq(BaseMsg):
+class ExecuteReq(BaseReq):
     # TODO : Add fields
     ...
 
-class ExecuteResp(BaseMsg):
+class ExecuteResp(BaseResp):
     # TODO : Add fields
     ...
 
