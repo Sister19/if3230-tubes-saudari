@@ -14,6 +14,50 @@ from utils.MsgParser import MsgParser
 from structs.Log import Log
 from msgs.VoteMsg import VoteReq, VoteResp
 from msgs.BaseMsg import BaseReq, BaseResp, RespStatus
+from typing import TypedDict, TypeVar, Generic
+from msgs.ErrorMsg import ErrorResp
+import json
+
+T = TypeVar('T', bound=TypedDict)
+
+class StableStorage(Generic[T]):
+    def __init__(self, addr: Address):
+        self.id = self.__id_from_addr(addr)
+        self.path = f"persistence/{self.id}.json"
+
+    def __id_from_addr(self, addr: Address):
+        return f"{addr.ip}_{addr.port}"
+
+    def __store(self, data: str):
+        with open(self.path, 'w') as f:
+            f.write(data)
+    
+    def __load(self):
+        with open(self.path, 'r') as f:
+            return f.read()
+    
+    def load(self) -> T:
+        return json.loads(self.__load())
+    
+    def update(self, key: str, value: Any) -> T:
+        data = self.load()
+        data[key] = value
+        str_data = json.dumps(data)
+        self.__store(str_data)
+
+        return data
+    
+    def storeAll(self, data: T) -> T:
+        str_data = json.dumps(data)
+        self.__store(str_data)
+
+        return data
+    
+    def try_load(self):
+        try:
+            return self.load()
+        except:
+            return None
 
 class RPCHandler:
     def __init__(self):
@@ -31,9 +75,11 @@ class RPCHandler:
             return response
         except Exception as e:
             print(f"Error while sending request to {addr.ip}:{addr.port}: {e}")
-            return BaseResp({
+            return json.dumps(ErrorResp({
                 'status': RespStatus.FAILED.value,
-            })
+                'address': addr,
+                'error': str(e),
+            }))
     
     def request(self, addr: Address, rpc_name: str, msg: BaseMsg):
         redirect_addr = addr
@@ -52,7 +98,8 @@ class RPCHandler:
         # TODO: handle fail response
         if response["status"] == RespStatus.FAILED.value:
             print("Failed to send request")
-            exit(1)
+            # exit(1)
+            raise Exception(response["error"])
 
         response["address"] = redirect_addr
         return response
@@ -73,6 +120,13 @@ class RaftNode:
         APPLY_MEMBERSHIP = "apply_membership"
         REQUEST_VOTE = "request_vote"
         HEARTBEAT = "heartbeat"
+    
+    class StableVars(TypedDict):
+        election_term: int
+        voted_for: Address     
+        log: List[Log] 
+        commit_length: int
+
 
     # Heeh, semua yang diatas dari komen ini
 
@@ -105,17 +159,22 @@ class RaftNode:
         self.__init_volatile()
 
     def __try_fetch_stable(self):
-        # TODO: get stable storage
-        # if exist persistence, get persistence, return
+        self.stable_storage = StableStorage[RaftNode.StableVars](self.address)
+        loaded = self.stable_storage.try_load()
+        if loaded is not None:
+            self.__print_log(f"Loaded stable storage: {loaded}")
+            return
 
         self.__init_stable()
 
     def __init_stable(self):
-        # TODO: store in stable storage
-        self.election_term:       int = 0
-        self.voted_for: Address     = None # TODO: add type, #QUESTIONABLE: hah ngapain dia voted ke selain candidate?
-        self.log:                 List[Log] = []
-        self.commit_length: int = 0
+        data = RaftNode.StableVars({
+            'election_term': 0,
+            'voted_for': None,
+            'log': [],
+            'commit_length': 0,
+        })
+        self.stable_storage.storeAll(data)
 
     def __init_volatile(self):
         self.type:                RaftNode.NodeType = RaftNode.NodeType.FOLLOWER
@@ -125,21 +184,23 @@ class RaftNode:
         self.acked_length = []
 
     def vote_leader(self):
-        self.election_term += 1
+        stable_vars = self.stable_storage.load()
+
+        stable_vars = self.stable_storage.update('election_term', stable_vars['election_term'] + 1)
+        stable_vars = self.stable_storage.update('voted_for', self.address) # FIXME: voted_for = leader_addr? ato beda? bisa disamain kok
         self.type = RaftNode.NodeType.CANDIDATE
-        self.voted_for = self.address # FIXME: voted_for = leader_addr? ato beda? bisa disamain kok
         self.votes_received = [self.address]
         
         last_term = 0
-        if len(self.log) > 0:
-            last_term = self.log[-1]["term"]
+        if len(stable_vars["log"]) > 0:
+            last_term = stable_vars["log"][-1]["term"]
 
         # FIXME: Check konsistensi log juga
         
         msg = VoteReq({
-            'voted_for': self.voted_for, 
-            'term': self.election_term,
-            'log_length': len(self.log),
+            'voted_for': stable_vars["voted_for"], 
+            'term': stable_vars["election_term"],
+            'log_length': len(stable_vars["log"]),
             'last_term': last_term, # FIXME: Last term buat apa?
         })
 
@@ -162,16 +223,21 @@ class RaftNode:
         voter_term = response["current_term"]
         granted = response["granted"]
 
-        if self.type == RaftNode.NodeType.CANDIDATE and self.election_term == voter_term and granted:
+        stable_vars = self.stable_storage.load()
+        # election_term = stable_vars["election_term"]
+
+        if self.type == RaftNode.NodeType.CANDIDATE and stable_vars["election_term"] == voter_term and granted:
             self.votes_received.append(voter_id)
             if len(self.votes_received) >= (len(self.cluster_addr_list) + 1) / 2:
                 self.__initialize_as_leader()
                 # TODO: cancel election timer
                 # TODO: replicate log for all cluster nodes
-        elif voter_term > self.election_term:
-            self.election_term = voter_term
+        elif voter_term > stable_vars["election_term"]:
+            stable_vars["election_term"] = voter_term
+            stable_vars["voted_for"] = None
+            self.stable_storage.storeAll(stable_vars)
+
             self.type = RaftNode.NodeType.FOLLOWER
-            self.voted_for = None
             # TODO: cancel election timer
         
     
@@ -183,27 +249,32 @@ class RaftNode:
         cTerm = request["term"]
         cLogLength = request["log_length"]
         cLogTerm = request["last_term"]
+
+        stable_vars = self.stable_storage.load()
         
-        if cTerm > self.election_term:
-            self.election_term = cTerm
-            self.voted_for = None
+        if cTerm > stable_vars["election_term"]:
+            stable_vars["election_term"] = cTerm
+            stable_vars["voted_for"] = None
+            self.stable_storage.storeAll(stable_vars)
+
             self.type = RaftNode.NodeType.FOLLOWER
         
         last_term = 0
-        if len(self.log) > 0:
-            last_term = self.log[-1].term
+        if len(stable_vars["log"]) > 0:
+            last_term = stable_vars["log"][-1]["term"]
         
-        logOk = (cLogTerm > last_term) or (cLogTerm == last_term and cLogLength >= len(self.log))
+        logOk = (cLogTerm > last_term) or (cLogTerm == last_term and cLogLength >= len(stable_vars["log"]))
 
         response = VoteResp({
             'status': "success",
             'address': self.address,
             'node_addr': self.address,
-            'current_term': self.election_term,            
+            'current_term': stable_vars["election_term"],            
         })
 
-        if (cTerm == self.election_term and logOk and (self.voted_for is None or self.voted_for == cId)):
-            self.voted_for = cId
+        if (cTerm == stable_vars["election_term"] and logOk 
+            and (stable_vars["voted_for"] is None or stable_vars["voted_for"] == cId)):
+            self.stable_storage.update('voted_for', cId)
             response["vote_granted"] = True
         else:
             response["vote_granted"] = False
@@ -247,21 +318,22 @@ class RaftNode:
                         continue
 
                     addr = self.cluster_addr_list[i]
+                    stable_vars = self.stable_storage.load()
 
                     # TODO: calc prefix len
                     prefix_len = 0
-                    suffix = self.log[prefix_len:]
+                    suffix = stable_vars["log"][prefix_len:]
                     prefix_term = 0
                     if prefix_len > 0:
-                        prefix_term = self.log[prefix_len - 1].term
+                        prefix_term = stable_vars["log"][prefix_len - 1]["term"]
 
                     msg = HeartbeatReq({
                         "leader_addr": self.address,
-                        "term": self.election_term,
+                        "term": stable_vars["election_term"],
                         "prefix_len": prefix_len,
                         "prefix_term": prefix_term,
                         "suffix": suffix,
-                        "commit_length": self.commit_length,
+                        "commit_length": stable_vars["commit_length"],
                     })
                     
                     self.rpc_handler.request(
@@ -279,8 +351,8 @@ class RaftNode:
             contact_addr, RaftNode.FuncRPC.APPLY_MEMBERSHIP.value, msg)
         
         # TODO: handle failed response
-
-        self.log = response["log"]
+        self.__print_log(f"Response : {response}")
+        self.stable_storage.update("log", response["log"])
         self.cluster_addr_list = response["cluster_addr_list"]
         self.cluster_leader_addr = response["address"]
 
@@ -305,9 +377,12 @@ class RaftNode:
         request = self.msg_parser.deserialize(json_request)
         print(f"Request : {request}")
         self.cluster_addr_list.append(Address(request["ip"], request["port"]))
+
+        stable_vars = self.stable_storage.load()
+
         response = ApplyMembershipResp({
             "status":            "success",
-            "log":               self.log, # FIXME: log terbaru apa semua? yang terbaru aja
+            "log":               stable_vars["log"], # FIXME: log terbaru apa semua? yang terbaru aja
             "cluster_addr_list": self.cluster_addr_list,
         })
         return self.msg_parser.serialize(response)
