@@ -13,9 +13,12 @@ from msgs.ExecuteMsg import ExecuteReq, ExecuteResp
 from utils.MsgParser import MsgParser
 from structs.Log import Log
 from msgs.VoteMsg import VoteReq, VoteResp
+from msgs.AddLogMsg import AddLogReq, AddLogResp
+from msgs.CommitLogMsg import CommitLogReq, CommitLogResp
 from msgs.BaseMsg import BaseReq, BaseResp, RespStatus
 from typing import TypedDict, TypeVar, Generic
 from msgs.ErrorMsg import ErrorResp
+from utils.RPCHandler import RPCHandler
 import json
 
 T = TypeVar('T', bound=TypedDict)
@@ -58,52 +61,6 @@ class StableStorage(Generic[T]):
             return self.load()
         except:
             return None
-
-class RPCHandler:
-    def __init__(self):
-        self.msg_parser = MsgParser()
-
-    def __call(self, addr: Address, rpc_name: str, msg: BaseMsg):
-        node = ServerProxy(f"http://{addr.ip}:{addr.port}")
-        json_request = self.msg_parser.serialize(msg)
-        print(f"Sending request to {addr.ip}:{addr.port}...")
-        rpc_function = getattr(node, rpc_name)
-
-        try:
-            response = rpc_function(json_request)
-            print(f"Response from {addr.ip}:{addr.port}: {response}")
-            return response
-        except Exception as e:
-            print(f"Error while sending request to {addr.ip}:{addr.port}: {e}")
-            return json.dumps(ErrorResp({
-                'status': RespStatus.FAILED.value,
-                'address': addr,
-                'error': str(e),
-            }))
-    
-    def request(self, addr: Address, rpc_name: str, msg: BaseMsg):
-        redirect_addr = addr
-        response = BaseResp({
-            'status': RespStatus.REDIRECTED.value,
-            'address': redirect_addr,
-        })
-
-        while response["status"] == RespStatus.REDIRECTED.value:
-            redirect_addr = Address(
-                response["address"]["ip"],
-                response["address"]["port"],
-            )
-            response = self.msg_parser.deserialize(self.__call(redirect_addr, rpc_name, msg))
-        
-        # TODO: handle fail response
-        if response["status"] == RespStatus.FAILED.value:
-            print("Failed to send request")
-            # exit(1)
-            raise Exception(response["error"])
-
-        response["address"] = redirect_addr
-        return response
-
 class RaftNode:
     # FIXME: knp di dalem class? mending taro luar biar bisa dipake
     HEARTBEAT_INTERVAL = 1
@@ -120,6 +77,8 @@ class RaftNode:
         APPLY_MEMBERSHIP = "apply_membership"
         REQUEST_VOTE = "request_vote"
         HEARTBEAT = "heartbeat"
+        APPEND_LOG = "append_log"
+        COMMIT_LOG = "commit_log"
     
     class StableVars(TypedDict):
         election_term: int
@@ -129,6 +88,17 @@ class RaftNode:
 
 
     # Heeh, semua yang diatas dari komen ini
+
+    address: Address
+    app: Any
+    cluster_addr_list: List[Address]
+    msg_parser: MsgParser
+    rpc_handler: RPCHandler
+    stable_storage: StableStorage[StableVars]
+    type: NodeType
+    cluster_leader_addr : Address
+    sent_length: List[int]
+    acked_length : List[int]
 
     def __init__(self, application: Any, addr: Address, contact_addr: Address = None):
         socket.setdefaulttimeout(RaftNode.RPC_TIMEOUT)
@@ -142,7 +112,7 @@ class RaftNode:
         self.__init_volatile()
 
         # additional vars
-        self.cluster_addr_list:   List[Address] = [] # FIXME: Lebih baik dijadiin struct ajah, daripada bergantung dengan index, karena di join sama data last sent
+        self.cluster_addr_list:   List[Address] = [] 
         self.msg_parser: MsgParser = MsgParser()
         self.rpc_handler: RPCHandler = RPCHandler()
 
@@ -179,8 +149,8 @@ class RaftNode:
     def __init_volatile(self):
         self.type:                RaftNode.NodeType = RaftNode.NodeType.FOLLOWER
         self.cluster_leader_addr: Address = None
-        self.votes_received: List[Address] = [] # FIXME: Ini mah gausah disimpen, sementara
-        self.sent_length = [] # FIXME: Sent length gaperlu, ini bukan tcp wkwk
+        self.votes_received: List[Address] = []
+        self.sent_length = []
         self.acked_length = []
 
     def vote_leader(self):
@@ -368,7 +338,45 @@ class RaftNode:
             'status':RespStatus.SUCCESS.value,
             "heartbeat_response": "ack",
             "address":            self.address,
+        })  
+        return self.msg_parser.serialize(response)
+    
+    def append_log(self, json_request: str) -> str:
+        request = self.msg_parser.deserialize(json_request)
+        log = Log({
+            "term": request["term"],
+            "command": request["command"],
+            "value": request["value"],
+            "is_committed": False
         })
+
+        stable_vars = self.stable_storage.load()
+        stable_vars["log"].append(log)
+        self.stable_storage.update("log", stable_vars["log"])
+
+        response = AddLogResp({
+            "status": RespStatus.SUCCESS.value,
+            "address": self.address,
+        })
+
+        return self.msg_parser.serialize(response)
+    
+    def commit_log(self, json_request: str) -> str:
+        request = self.msg_parser.deserialize(json_request)
+        
+        stable_vars = self.stable_storage.load()
+        for i in range(stable_vars["commit_length"], request["commit_length"]):
+            print(f"Committing log {i}")
+            # Execute Command
+
+        stable_vars["commit_length"] = request["commit_length"]
+        self.stable_storage.update("commit_length", stable_vars["commit_length"])
+
+        response = CommitLogResp({
+            "status": RespStatus.SUCCESS.value,
+            "address": self.address,
+        })
+
         return self.msg_parser.serialize(response)
 
     # Client RPCs
@@ -389,6 +397,67 @@ class RaftNode:
 
     def execute(self, json_request: str) -> str:
         request: ExecuteReq = self.msg_parser.deserialize(json_request)
-        # TODO : Implement execute
-        response = ExecuteResp({})
+        
+        self.votes_received = 0
+        stable_vars = self.stable_storage.load()
+
+        log = Log({
+            "term": stable_vars["election_term"],
+            "command": request["command"],
+            "value": request["value"],
+        })
+
+        stable_vars["log"].append(log)
+        self.stable_storage.update("log", stable_vars["log"])
+
+        # TODO: EVENT MANAGEMENT
+        self.wait_for_votes = asyncio.Event()
+
+        for addr in self.cluster_addr_list:
+            if addr == self.address:
+                continue
+            asyncio.create_task(self.__send_append_log(addr, log))
+
+        async def wait_for_votes():
+            await self.wait_for_votes.wait()
+
+        if len(self.cluster_addr_list) > 1:
+            asyncio.get_event_loop().run_until_complete(wait_for_votes())
+
+
+        # TODO: Execute Command
+        stable_vars["commit_length"] += 1
+        self.stable_storage.update("commit_length", stable_vars["commit_length"])
+
+        for addr in self.cluster_addr_list:
+            if addr == self.address:
+                continue
+            asyncio.create_task(self.__send_commit_log(addr, stable_vars["commit_length"]))            
+
+        response = ExecuteResp({
+            "status": RespStatus.SUCCESS.value,
+            "address": self.address,
+        })
         return self.msg_parser.serialize(response)
+    
+    async def __send_append_log(self, addr: Address, log: Log):
+        msg = AddLogReq({
+            "term": log["term"],
+            "command": log["command"],
+            "value": log["value"],
+        })
+        response: AddLogResp = self.rpc_handler.request(
+            addr, RaftNode.FuncRPC.APPEND_LOG.value, msg)
+        
+        if (response["status"] == RespStatus.SUCCESS.value):
+            self.votes_received += 1
+            if self.votes_received >= len(self.cluster_addr_list) // 2 + 1:
+                self.wait_for_votes.set()
+        
+    async def __send_commit_log(self, addr: Address, commit_length: int):
+        stable_vars = self.stable_storage.load()
+        msg = CommitLogReq({
+            commit_length: stable_vars["commit_length"],
+        })
+        self.rpc_handler.request(
+            addr, RaftNode.FuncRPC.COMMIT_LOG.value, msg)

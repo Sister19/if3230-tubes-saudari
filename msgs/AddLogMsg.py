@@ -1,9 +1,9 @@
 from msgs.BaseMsg import BaseReq, BaseResp
 
-class ExecuteReq(BaseReq):
+class AddLogReq(BaseReq):
     command: str
     value: str
+    term: str
 
-class ExecuteResp(BaseResp):
-    data: dict
-
+class AddLogResp(BaseResp):
+    ...
