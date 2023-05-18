@@ -20,6 +20,7 @@ from typing import TypedDict, TypeVar, Generic
 from msgs.ErrorMsg import ErrorResp
 from utils.RPCHandler import RPCHandler
 import json
+import math
 
 T = TypeVar('T', bound=TypedDict)
 
@@ -355,7 +356,7 @@ class RaftNode:
                         if success_append and ack >= acked_len:
                             self.lst_vars.set_sent_length(follower_idx, ack)
                             self.lst_vars.set_acked_length(follower_idx, ack)
-                            # TODO: commit entries
+                            self.__commit_log_entries()
                         elif self.lst_vars.sent_length(follower_idx) > 0:
                             self.lst_vars.set_sent_length(follower_idx, self.lst_vars.sent_length(follower_idx) - 1)
                             # TODO: REPLICATE LOG
@@ -453,6 +454,44 @@ class RaftNode:
                 pass
             stable_vars["commit_length"] = leader_commit
             stable_vars = self.stable_storage.storeAll(stable_vars)
+    
+    def __calc_num_ack(self, idx: int):
+        num_nodes = self.lst_vars.len()
+        num_acked = 0
+        for i in range(num_nodes):
+            if self.lst_vars.acked_length(i) >= idx:
+                num_acked += 1
+        
+        return num_acked
+
+    def __commit_log_entries(self):
+        min_acks = math.ceil((self.lst_vars.len() + 1) / 2)
+        stable_vars = self.stable_storage.load()
+
+        log = stable_vars["log"]
+        acked_above_threshold = [
+            self.__calc_num_ack(x) >= min_acks
+            for x in range(len(log))
+        ]
+        latest_ack = -1
+        # iterate in reverse order
+        for i in range(len(log) - 1, -1, -1):
+            if acked_above_threshold[i]:
+                latest_ack = i
+                break
+        
+        commit_length = stable_vars["commit_length"]
+        last_log_term = log[latest_ack-1]["term"]
+        election_term = stable_vars["election_term"]
+        if (latest_ack != -1 
+            and latest_ack > commit_length
+            and last_log_term == election_term):
+            for i in range(commit_length, latest_ack):
+                # TODO: DELIVER LOG TO APP
+                pass
+        
+            self.stable_storage.update("commit_length", latest_ack)
+
 
     def append_log(self, json_request: str) -> str:
         request = self.msg_parser.deserialize(json_request)
