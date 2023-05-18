@@ -132,9 +132,6 @@ class RaftNode:
     stable_storage: StableStorage[StableVars]
     type: NodeType
     cluster_leader_addr : Address
-    # cluster_addr_list: List[Address]
-    # sent_length: List[int]
-    # acked_length : List[int]
     lst_vars: LstVars
     votes_received: List[Address]
 
@@ -155,7 +152,6 @@ class RaftNode:
 
         if contact_addr is None:
             self.lst_vars.append_addr(self.address)
-            # self.cluster_addr_list.append(self.address)
             self.__initialize_as_leader()
         else:
             self.__try_to_apply_membership(contact_addr)
@@ -189,9 +185,7 @@ class RaftNode:
         self.cluster_leader_addr: Address = None
         self.votes_received: List[Address] = []
         self.lst_vars = RaftNode.LstVars()
-        # self.sent_length = []
-        # self.acked_length = []
-        # self.cluster_addr_list: List[Address] = [] 
+
 
     def vote_leader(self):
         stable_vars = self.stable_storage.load()
@@ -234,7 +228,6 @@ class RaftNode:
         granted = response["granted"]
 
         stable_vars = self.stable_storage.load()
-        # election_term = stable_vars["election_term"]
 
         if self.type == RaftNode.NodeType.CANDIDATE and stable_vars["election_term"] == voter_term and granted:
             self.votes_received.append(voter_id)
@@ -292,7 +285,6 @@ class RaftNode:
         print(f"response vote: {response}")
         return self.msg_parser.serialize(response)
         
-    # Internal Raft Node methods
 
     def __print_log(self, text: str): # FIXME: Plis jangan print_log gua kira ngeprint isi log
         print(f"[{self.address}] [{time.strftime('%H:%M:%S')}] {text}")
@@ -307,13 +299,6 @@ class RaftNode:
         self.__print_log("Initialize as leader node...")
         self.cluster_leader_addr = self.address # FIXME: cluster_leader_addr = voted_for? ato beda? bisa disamain kok
         self.type = RaftNode.NodeType.LEADER
-        # request = {
-        #     "cluster_leader_addr": self.address
-        # }
-        # # TODO : Inform to all node this is new leader
-        # self.heartbeat_thread = Thread(target=asyncio.run, args=[ #FIXME: berarti klo bukan leader, thread loopnya beda lagi?
-        #                                self.__leader_heartbeat()])
-        # self.heartbeat_thread.start()
 
     async def __leader_heartbeat(self):
         # TODO : Send periodic heartbeat
@@ -426,7 +411,6 @@ class RaftNode:
         request = self.msg_parser.deserialize(json_request)
         print(f"Request : {request}")
         self.lst_vars.append_addr(Address(request["ip"], request["port"]))
-        # self.cluster_addr_list.append(Address(request["ip"], request["port"]))
 
         stable_vars = self.stable_storage.load()
 
@@ -455,7 +439,6 @@ class RaftNode:
         # TODO: EVENT MANAGEMENT
         self.wait_for_votes = asyncio.Event()
 
-        # for addr in self.cluster_addr_list:
         for i in range(self.lst_vars.len()):
             addr = self.lst_vars.cluster_addr_list(i)
             if addr == self.address:
@@ -465,7 +448,6 @@ class RaftNode:
         async def wait_for_votes():
             await self.wait_for_votes.wait()
 
-        # if len(self.cluster_addr_list) > 1:
         if self.lst_vars.len() > 1:
             asyncio.get_event_loop().run_until_complete(wait_for_votes())
 
