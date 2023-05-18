@@ -13,8 +13,7 @@ class HeartbeatReq(BaseReq):
     commit_length: int
     suffix: List[Log]
 
-class HeartbeatRespType(Enum):
-    ACK = "ack"
-
 class HeartbeatResp(BaseResp):
-    heartbeat_response: HeartbeatRespType
+    ack: int
+    term: int
+    success_append: bool

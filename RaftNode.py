@@ -1,14 +1,14 @@
 import asyncio
 from threading import Thread
 from xmlrpc.client import ServerProxy
-from typing import Any, List
+from typing import Any, List, Set
 from enum import Enum
 from Address import Address
 import socket
 import time
 from msgs.ApplyMembershipMsg import ApplyMembershipReq, ApplyMembershipResp
 from msgs.BaseMsg import BaseMsg
-from msgs.HeartbeatMsg import HeartbeatResp, HeartbeatRespType, HeartbeatReq
+from msgs.HeartbeatMsg import HeartbeatResp, HeartbeatReq
 from msgs.ExecuteMsg import ExecuteReq, ExecuteResp
 from utils.MsgParser import MsgParser
 from structs.Log import Log
@@ -124,6 +124,12 @@ class RaftNode:
             self.__sent_length = [0 for _ in range(len(cluster_addr_list))]
             self.__acked_length = [0 for _ in range(len(cluster_addr_list))]
         
+        def set_sent_length(self, i: int, length: int):
+            self.__sent_length[i] = length
+        
+        def set_acked_length(self, i: int, length: int):
+            self.__acked_length[i] = length
+        
 
     address: Address
     app: Any
@@ -133,7 +139,7 @@ class RaftNode:
     type: NodeType
     cluster_leader_addr : Address
     lst_vars: LstVars
-    votes_received: List[Address]
+    votes_received: Set[Address]
 
     def __init__(self, application: Any, addr: Address, contact_addr: Address = None):
         socket.setdefaulttimeout(RaftNode.RPC_TIMEOUT)
@@ -183,7 +189,7 @@ class RaftNode:
     def __init_volatile(self):
         self.type:                RaftNode.NodeType = RaftNode.NodeType.FOLLOWER
         self.cluster_leader_addr: Address = None
-        self.votes_received: List[Address] = []
+        self.votes_received: Set[Address] = set[Address]()
         self.lst_vars = RaftNode.LstVars()
 
 
@@ -217,7 +223,7 @@ class RaftNode:
         # TODO: pindahin start timer ke sini
 
     async def __try_request_vote(self, addr_dest: Address, msg: VoteReq):
-        response = self.rpc_handler.request(
+        response: VoteResp = self.rpc_handler.request(
             addr_dest,
             RaftNode.FuncRPC.REQUEST_VOTE.value,
             msg,
@@ -230,7 +236,7 @@ class RaftNode:
         stable_vars = self.stable_storage.load()
 
         if self.type == RaftNode.NodeType.CANDIDATE and stable_vars["election_term"] == voter_term and granted:
-            self.votes_received.append(voter_id)
+            self.votes_received.add(voter_id)
             if len(self.votes_received) >= (self.lst_vars.len() + 1) / 2:
                 self.__initialize_as_leader()
                 # TODO: cancel election timer
@@ -315,8 +321,7 @@ class RaftNode:
 
                     stable_vars = self.stable_storage.load()
 
-                    # TODO: calc prefix len
-                    prefix_len = 0
+                    prefix_len = self.lst_vars.sent_length(i)
                     suffix = stable_vars["log"][prefix_len:]
                     prefix_term = 0
                     if prefix_len > 0:
@@ -331,11 +336,36 @@ class RaftNode:
                         "commit_length": stable_vars["commit_length"],
                     })
                     
-                    self.rpc_handler.request(
+                    resp: HeartbeatResp = self.rpc_handler.request(
                         addr,
                         RaftNode.FuncRPC.HEARTBEAT.value,
                         msg,
                     )
+
+                    follower_idx = i
+                    resp_term = resp["term"]
+                    ack = resp["ack"]
+                    success_append = resp["success_append"]
+
+                    acked_len = self.lst_vars.acked_length(follower_idx)
+
+                    stable_vars = self.stable_storage.load()
+
+                    if resp_term == stable_vars["election_term"] and self.type == RaftNode.NodeType.LEADER:
+                        if success_append and ack >= acked_len:
+                            self.lst_vars.set_sent_length(follower_idx, ack)
+                            self.lst_vars.set_acked_length(follower_idx, ack)
+                            # TODO: commit entries
+                        elif self.lst_vars.sent_length(follower_idx) > 0:
+                            self.lst_vars.set_sent_length(follower_idx, self.lst_vars.sent_length(follower_idx) - 1)
+                            # TODO: REPLICATE LOG
+                    elif resp_term > stable_vars["election_term"]:
+                        stable_vars["election_term"] = resp_term
+                        stable_vars["voted_for"] = None
+                        self.stable_storage.storeAll(stable_vars)
+                        self.type = RaftNode.NodeType.FOLLOWER
+                        # TODO: cancel election timer
+                        break
 
             await asyncio.sleep(RaftNode.HEARTBEAT_INTERVAL)
 
@@ -355,18 +385,75 @@ class RaftNode:
     # Inter-node RPCs
     def heartbeat(self, json_request: str) -> str:
         # TODO : Implement heartbeat, reappend log baru dan check commitnya juga
-        request = self.msg_parser.deserialize(json_request)
+        request: HeartbeatReq = self.msg_parser.deserialize(json_request)
         self.__print_log(f"Request : {request}")
 
-        # TODO: handle request
+        leader_addr = request["leader_addr"]
+        req_term = request["term"]
+        prefix_len = request["prefix_len"]
+        prefix_term = request["prefix_term"]
+        leader_commit = request["commit_length"]
+        suffix = request["suffix"]
 
+        stable_vars = self.stable_storage.load()
+
+        if req_term > stable_vars["election_term"]:
+            stable_vars["election_term"] = req_term
+            stable_vars["voted_for"] = None
+            stable_vars = self.stable_storage.storeAll(stable_vars)
+            # TODO: cancel election timer
+        
+        if req_term == stable_vars["election_term"]:
+            self.type = RaftNode.NodeType.FOLLOWER
+            self.cluster_leader_addr = leader_addr
+        
+        log = stable_vars["log"]
+        log_ok = (
+            (len(log) >= prefix_len) and 
+            (prefix_len == 0 or log[prefix_len - 1]["term"] == prefix_term))
+        
         response = HeartbeatResp({
-            'status':RespStatus.SUCCESS.value,
+            'status': RespStatus.SUCCESS.value,
             "heartbeat_response": "ack",
             "address":            self.address,
-        })  
+            "term": stable_vars["election_term"],
+        })
+
+        if req_term == stable_vars["election_term"] and log_ok:
+            self.__append_entries(prefix_len, leader_commit, suffix)
+            ack = prefix_len + len(suffix)
+            response["ack"] = ack
+            response["success_append"] = True
+        else:
+            response["ack"] = 0
+            response["success_append"] = False
+
         return self.msg_parser.serialize(response)
     
+    def __append_entries(self, prefix_len: int, leader_commit: int, suffix: List[Log]):
+        stable_vars = self.stable_storage.load()
+        log = stable_vars["log"]
+
+        if len(suffix) > 0 and len(log) > prefix_len:
+            idx = min(len(log), prefix_len + len(suffix)) - 1
+            if log[idx]["term"] != suffix[idx - prefix_len]["term"]:
+                log = log[:prefix_len] # TODO: confirm
+        
+        if prefix_len + len(suffix) > len(log):
+            for i in range(len(log) - prefix_len, len(suffix)):
+                log.append(suffix[i])
+        
+        stable_vars["log"] = log
+        stable_vars = self.stable_storage.storeAll(stable_vars)
+
+        commit_length = stable_vars["commit_length"]
+        if leader_commit > commit_length:
+            for i in range(commit_length, leader_commit):
+                # TODO: deliver log to application
+                pass
+            stable_vars["commit_length"] = leader_commit
+            stable_vars = self.stable_storage.storeAll(stable_vars)
+
     def append_log(self, json_request: str) -> str:
         request = self.msg_parser.deserialize(json_request)
         log = Log({
@@ -424,6 +511,11 @@ class RaftNode:
     def execute(self, json_request: str) -> str:
         request: ExecuteReq = self.msg_parser.deserialize(json_request)
         
+        # FIXME: VOTES_RECEIVED should be set of address, not int
+        # in order to avoid different response from same node
+        # eg: duplicate vote from same node
+        # FIXME: VOTES_RECEIVED represent number of election votes
+        # not number of ack from append log
         self.votes_received = 0
         stable_vars = self.stable_storage.load()
 
