@@ -89,16 +89,54 @@ class RaftNode:
 
     # Heeh, semua yang diatas dari komen ini
 
+    class LstVars:
+        __cluster_addr_list: List[Address]
+        __sent_length: List[int]
+        __acked_length : List[int]
+
+        def __init__(self):
+            self.__cluster_addr_list = []
+            self.__sent_length = []
+            self.__acked_length = []
+
+        def append_addr(self, addr: Address):
+            self.__cluster_addr_list.append(addr)
+            self.__sent_length.append(0)
+            self.__acked_length.append(0)
+        
+        def cp_cluster_addr_list(self):
+            return self.__cluster_addr_list.copy()
+
+        def cluster_addr_list(self, i: int):
+            return self.__cluster_addr_list[i]
+        
+        def sent_length(self, i: int):
+            return self.__sent_length[i]
+        
+        def acked_length(self, i: int):
+            return self.__acked_length[i]
+    
+        def len(self):
+            return len(self.__cluster_addr_list)
+        
+        def set_cluster_addr_list(self, cluster_addr_list: List[Address]):
+            self.__cluster_addr_list = cluster_addr_list
+            self.__sent_length = [0 for _ in range(len(cluster_addr_list))]
+            self.__acked_length = [0 for _ in range(len(cluster_addr_list))]
+        
+
     address: Address
     app: Any
-    cluster_addr_list: List[Address]
     msg_parser: MsgParser
     rpc_handler: RPCHandler
     stable_storage: StableStorage[StableVars]
     type: NodeType
     cluster_leader_addr : Address
-    sent_length: List[int]
-    acked_length : List[int]
+    # cluster_addr_list: List[Address]
+    # sent_length: List[int]
+    # acked_length : List[int]
+    lst_vars: LstVars
+    votes_received: List[Address]
 
     def __init__(self, application: Any, addr: Address, contact_addr: Address = None):
         socket.setdefaulttimeout(RaftNode.RPC_TIMEOUT)
@@ -112,12 +150,12 @@ class RaftNode:
         self.__init_volatile()
 
         # additional vars
-        self.cluster_addr_list:   List[Address] = [] 
         self.msg_parser: MsgParser = MsgParser()
         self.rpc_handler: RPCHandler = RPCHandler()
 
         if contact_addr is None:
-            self.cluster_addr_list.append(self.address)
+            self.lst_vars.append_addr(self.address)
+            # self.cluster_addr_list.append(self.address)
             self.__initialize_as_leader()
         else:
             self.__try_to_apply_membership(contact_addr)
@@ -150,8 +188,10 @@ class RaftNode:
         self.type:                RaftNode.NodeType = RaftNode.NodeType.FOLLOWER
         self.cluster_leader_addr: Address = None
         self.votes_received: List[Address] = []
-        self.sent_length = []
-        self.acked_length = []
+        self.lst_vars = RaftNode.LstVars()
+        # self.sent_length = []
+        # self.acked_length = []
+        # self.cluster_addr_list: List[Address] = [] 
 
     def vote_leader(self):
         stable_vars = self.stable_storage.load()
@@ -174,8 +214,8 @@ class RaftNode:
             'last_term': last_term, # FIXME: Last term buat apa?
         })
 
-        for i in range(len(self.cluster_addr_list)):
-            addr = self.cluster_addr_list[i]
+        for i in range(self.lst_vars.len()):
+            addr = self.lst_vars.cluster_addr_list(i)
             # TODO: make sure async
             asyncio.create_task(self.__try_request_vote(addr, msg))
 
@@ -198,7 +238,7 @@ class RaftNode:
 
         if self.type == RaftNode.NodeType.CANDIDATE and stable_vars["election_term"] == voter_term and granted:
             self.votes_received.append(voter_id)
-            if len(self.votes_received) >= (len(self.cluster_addr_list) + 1) / 2:
+            if len(self.votes_received) >= (self.lst_vars.len() + 1) / 2:
                 self.__initialize_as_leader()
                 # TODO: cancel election timer
                 # TODO: replicate log for all cluster nodes
@@ -283,11 +323,11 @@ class RaftNode:
                 pass # FIXME: WHaat?
 
                 # TODO : Send heartbeat to all node
-                for i in range(len(self.cluster_addr_list)):
-                    if self.cluster_addr_list[i] == self.address:
+                for i in range(self.lst_vars.len()):
+                    addr = self.lst_vars.cluster_addr_list(i)
+                    if addr == self.address:
                         continue
 
-                    addr = self.cluster_addr_list[i]
                     stable_vars = self.stable_storage.load()
 
                     # TODO: calc prefix len
@@ -323,7 +363,8 @@ class RaftNode:
         # TODO: handle failed response
         self.__print_log(f"Response : {response}")
         self.stable_storage.update("log", response["log"])
-        self.cluster_addr_list = response["cluster_addr_list"]
+        # self.cluster_addr_list = response["cluster_addr_list"]
+        self.lst_vars.set_cluster_addr_list(response["cluster_addr_list"])
         self.cluster_leader_addr = response["address"]
 
     # Inter-node RPCs
@@ -384,14 +425,15 @@ class RaftNode:
         # TODO : Implement apply_membership
         request = self.msg_parser.deserialize(json_request)
         print(f"Request : {request}")
-        self.cluster_addr_list.append(Address(request["ip"], request["port"]))
+        self.lst_vars.append_addr(Address(request["ip"], request["port"]))
+        # self.cluster_addr_list.append(Address(request["ip"], request["port"]))
 
         stable_vars = self.stable_storage.load()
 
         response = ApplyMembershipResp({
             "status":            "success",
             "log":               stable_vars["log"], # FIXME: log terbaru apa semua? yang terbaru aja
-            "cluster_addr_list": self.cluster_addr_list,
+            "cluster_addr_list": self.lst_vars.cp_cluster_addr_list(),
         })
         return self.msg_parser.serialize(response)
 
@@ -413,7 +455,9 @@ class RaftNode:
         # TODO: EVENT MANAGEMENT
         self.wait_for_votes = asyncio.Event()
 
-        for addr in self.cluster_addr_list:
+        # for addr in self.cluster_addr_list:
+        for i in range(self.lst_vars.len()):
+            addr = self.lst_vars.cluster_addr_list(i)
             if addr == self.address:
                 continue
             asyncio.create_task(self.__send_append_log(addr, log))
@@ -421,7 +465,8 @@ class RaftNode:
         async def wait_for_votes():
             await self.wait_for_votes.wait()
 
-        if len(self.cluster_addr_list) > 1:
+        # if len(self.cluster_addr_list) > 1:
+        if self.lst_vars.len() > 1:
             asyncio.get_event_loop().run_until_complete(wait_for_votes())
 
 
@@ -429,7 +474,9 @@ class RaftNode:
         stable_vars["commit_length"] += 1
         self.stable_storage.update("commit_length", stable_vars["commit_length"])
 
-        for addr in self.cluster_addr_list:
+        # for addr in self.cluster_addr_list:
+        for i in range(self.lst_vars.len()):
+            addr = self.lst_vars.cluster_addr_list(i)
             if addr == self.address:
                 continue
             asyncio.create_task(self.__send_commit_log(addr, stable_vars["commit_length"]))            
@@ -451,7 +498,7 @@ class RaftNode:
         
         if (response["status"] == RespStatus.SUCCESS.value):
             self.votes_received += 1
-            if self.votes_received >= len(self.cluster_addr_list) // 2 + 1:
+            if self.votes_received >= (self.lst_vars.len() // 2 + 1):
                 self.wait_for_votes.set()
         
     async def __send_commit_log(self, addr: Address, commit_length: int):
