@@ -469,6 +469,9 @@ class RaftNode:
         stable_vars = self.stable_storage.load()
 
         log = stable_vars["log"]
+        if (len(log) == 0):
+            return
+
         acked_above_threshold = [
             self.__calc_num_ack(x) >= min_acks
             for x in range(len(log))
@@ -481,7 +484,7 @@ class RaftNode:
                 break
         
         commit_length = stable_vars["commit_length"]
-        last_log_term = log[latest_ack-1]["term"]
+        last_log_term = log[latest_ack]["term"]
         election_term = stable_vars["election_term"]
         if (latest_ack != -1 
             and latest_ack > commit_length
