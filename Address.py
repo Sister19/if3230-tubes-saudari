@@ -17,7 +17,7 @@ class Address(dict):
         return iter((self.ip, self.port))
 
     def __eq__(self, other: "Address"):
-        return self.ip == other.ip and self.port == other.port
+        return self["ip"] == other["ip"] and self["port"] == other["port"]
 
     def __ne__(self, other: "Address"):
         return self.ip != other.ip or self.port != other.port

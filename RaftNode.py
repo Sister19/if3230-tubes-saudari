@@ -129,30 +129,6 @@ class RaftNode:
             for addr in addrs:
                 self.append_addr(addr)
 
-        # def cp_cluster_addr_list(self):
-        #     return self.__cluster_addr_list.copy()
-
-        # def cluster_addr_list(self, i: int):
-        #     return self.__cluster_addr_list[i]
-        
-        # def sent_length(self, i: int):
-        #     return self.__sent_length[i]
-        
-        # def acked_length(self, i: int):
-        #     return self.__acked_length[i]
-        
-        # def set_cluster_addr_list(self, cluster_addr_list: List[Address]):
-        #     self.__cluster_addr_list = cluster_addr_list
-        #     self.__sent_length = [0 for _ in range(len(cluster_addr_list))]
-        #     self.__acked_length = [0 for _ in range(len(cluster_addr_list))]
-        
-        # def set_sent_length(self, i: int, length: int):
-        #     self.__sent_length[i] = length
-        
-        # def set_acked_length(self, i: int, length: int):
-        #     self.__acked_length[i] = length
-        
-
     address: Address
     app: Any
     msg_parser: MsgParser
@@ -168,11 +144,11 @@ class RaftNode:
         self.address:             Address = addr
         self.app:                 Any = application
 
-        # stable storage vars
-        self.__try_fetch_stable()
-
         # volatile vars
         self.__init_volatile()
+
+        # stable storage vars
+        self.__try_fetch_stable()
 
         # additional vars
         self.msg_parser: MsgParser = MsgParser()
@@ -193,6 +169,7 @@ class RaftNode:
     def __callback_election_interval(self):
         self.__print_log("callback election interval")
         if self.type == RaftNode.NodeType.LEADER:
+            self.timeout = False
             return
 
         if not self.timeout:
@@ -200,7 +177,7 @@ class RaftNode:
             return
 
         # TODO: confirm
-        # self.__req_vote()
+        self.__req_vote()
 
     def __cancel_election_timeout(self):
         self.timeout = False
@@ -246,7 +223,8 @@ class RaftNode:
         stable_vars = self.stable_storage.update('election_term', stable_vars['election_term'] + 1)
         stable_vars = self.stable_storage.update('voted_for', self.address) # FIXME: voted_for = leader_addr? ato beda? bisa disamain kok
         self.type = RaftNode.NodeType.CANDIDATE
-        self.votes_received = [self.address]
+        self.votes_received = set[Address]()
+        self.votes_received.add(str(self.address))
         
         last_term = 0
         if len(stable_vars["log"]) > 0:
@@ -265,7 +243,7 @@ class RaftNode:
             self.__print_log(f"Sending request vote to {id}")
             elmt = self.lst_vars.elmt(id)
             # TODO: make sure async
-            asyncio.create_task(self.__try_request_vote(elmt["addr"], msg))
+            asyncio.run(self.__try_request_vote(elmt["addr"], msg))
 
         # TODO: start timer
         # TODO: pindahin start timer ke sini
@@ -277,6 +255,8 @@ class RaftNode:
             msg,
         )
 
+        self.__print_log(f"__try_request_vote.response: {response}")
+
         voter_id = response["node_addr"]
         voter_term = response["current_term"]
         granted = response["granted"]
@@ -284,7 +264,7 @@ class RaftNode:
         stable_vars = self.stable_storage.load()
 
         if self.type == RaftNode.NodeType.CANDIDATE and stable_vars["election_term"] == voter_term and granted:
-            self.votes_received.add(voter_id)
+            self.votes_received.add(str(voter_id))
             if len(self.votes_received) >= (self.lst_vars.len() + 1) / 2:
                 self.__initialize_as_leader()
                 # TODO: cancel election timer
@@ -301,7 +281,7 @@ class RaftNode:
     
     def request_vote(self, json_request: str):
         request: VoteReq = self.msg_parser.deserialize(json_request)
-        print(f"request vote: {request}")
+        self.__print_log(f"request vote: {request}")
 
         cId = request["voted_for"]
         cTerm = request["term"]
@@ -333,16 +313,16 @@ class RaftNode:
         if (cTerm == stable_vars["election_term"] and logOk 
             and (stable_vars["voted_for"] is None or stable_vars["voted_for"] == cId)):
             self.stable_storage.update('voted_for', cId)
-            response["vote_granted"] = True
+            response["granted"] = True
         else:
-            response["vote_granted"] = False
+            response["granted"] = False
         
-        print(f"response vote: {response}")
+        self.__print_log(f"response vote: {response}")
         return self.msg_parser.serialize(response)
         
 
     def __print_log(self, text: str): # FIXME: Plis jangan print_log gua kira ngeprint isi log
-        print(f"[{self.address}] [{time.strftime('%H:%M:%S')}] {text}")
+        print(f"[{self.address}] [{time.strftime('%H:%M:%S')}] [{self.type}] {text}")
 
     def __init_heartbeat(self):
         # TODO : Inform to all node this is new leader
@@ -359,7 +339,7 @@ class RaftNode:
         # TODO : Send periodic heartbeat
         while True:
             if self.type == RaftNode.NodeType.LEADER:
-                self.__print_log("[Leader] Sending heartbeat...")
+                self.__print_log("Sending heartbeat...")
                 pass # FIXME: WHaat?
 
                 # TODO : Send heartbeat to all node
@@ -425,7 +405,7 @@ class RaftNode:
 
     def __try_to_apply_membership(self, contact_addr: Address):
         msg = ApplyMembershipReq(self.address)
-        print(f"Sending msg : {msg}")
+        self.__print_log(f"Sending msg : {msg}")
         response: ApplyMembershipResp = self.rpc_handler.request(
             contact_addr, RaftNode.FuncRPC.APPLY_MEMBERSHIP.value, msg)
         
@@ -576,7 +556,7 @@ class RaftNode:
         
         stable_vars = self.stable_storage.load()
         for i in range(stable_vars["commit_length"], request["commit_length"]):
-            print(f"Committing log {i}")
+            self.__print_log(f"Committing log {i}")
             # Execute Command
 
         stable_vars["commit_length"] = request["commit_length"]
@@ -593,7 +573,7 @@ class RaftNode:
     def apply_membership(self, json_request: str) -> str: #FIXME: apply membership pake consensus, dan blocking 1 persatu
         # TODO : Implement apply_membership
         request = self.msg_parser.deserialize(json_request)
-        print(f"Request : {request}")
+        self.__print_log(f"Request : {request}")
         # TODO: notify existing nodes
         self.lst_vars.append_addr(Address(request["ip"], request["port"]))
 
