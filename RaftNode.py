@@ -22,7 +22,7 @@ from utils.RPCHandler import RPCHandler
 import json
 import math
 import random
-from utils.time import set_interval
+from utils.time import ResettableInterval
 
 T = TypeVar('T', bound=TypedDict)
 
@@ -169,23 +169,32 @@ class RaftNode:
     def __callback_election_interval(self):
         self.__print_log("callback election interval")
         if self.type == RaftNode.NodeType.LEADER:
+            self.__print_log("leader, cancel election timeout")
             self.timeout = False
             return
 
         if not self.timeout:
+            self.__print_log("not timeout, reset election timeout")
             self.timeout = True
             return
 
         # TODO: confirm
+        self.__print_log("timeout, request vote")
         self.__req_vote()
 
     def __cancel_election_timeout(self):
         self.timeout = False
+        self.election_interval.reset()
 
     def __init_timeout(self):
         self.timeout = False
-        self.election_interval = set_interval(
-            self.__callback_election_interval, self.election_timeout)
+        self.election_interval = ResettableInterval(
+            self.election_timeout,
+            self.__callback_election_interval
+        )
+        self.election_interval.start()
+        #set_interval(
+            #self.__callback_election_interval, self.election_timeout)
 
     def __on_recover_crash(self):
         self.__try_fetch_stable()
