@@ -69,9 +69,9 @@ class StableStorage(Generic[T]):
 class RaftNode:
     # FIXME: knp di dalem class? mending taro luar biar bisa dipake
     HEARTBEAT_INTERVAL = 1
-    ELECTION_TIMEOUT_MIN = 2
-    ELECTION_TIMEOUT_MAX = 3
-    RPC_TIMEOUT = 0.5
+    ELECTION_TIMEOUT_MIN = 10
+    ELECTION_TIMEOUT_MAX = 20
+    RPC_TIMEOUT = 3
 
     class NodeType(Enum):
         LEADER = 1
@@ -347,7 +347,6 @@ class RaftNode:
         while True:
             if self.type == RaftNode.NodeType.LEADER:
                 self.__print_log("Sending heartbeat...")
-                pass # FIXME: WHaat?
 
                 # TODO : Send heartbeat to all node
                 for id in self.lst_vars.ids():
@@ -387,8 +386,9 @@ class RaftNode:
                     acked_len = elmt["acked_length"]
 
                     stable_vars = self.stable_storage.load()
-
+                    print("RESP_TERM", resp_term, "STABLE_BARS", stable_vars['election_term'])
                     if resp_term == stable_vars["election_term"] and self.type == RaftNode.NodeType.LEADER:
+                        print("IS IT SUCCESSFUL??", success_append, "ack", ack, "ack length", acked_len)
                         if success_append and ack >= acked_len:
                             elmt["sent_length"] = ack
                             elmt["acked_length"] = ack
@@ -493,7 +493,7 @@ class RaftNode:
         if leader_commit > commit_length:
             for i in range(commit_length, leader_commit):
                 # TODO: deliver log to application
-                pass
+                self.app.executing_log(log, i)
             stable_vars["commit_length"] = leader_commit
             stable_vars = self.stable_storage.storeAll(stable_vars)
     
@@ -528,12 +528,13 @@ class RaftNode:
         commit_length = stable_vars["commit_length"]
         last_log_term = log[latest_ack]["term"]
         election_term = stable_vars["election_term"]
+        print("LATEST ACK", latest_ack, "COMMIT LENGTH", commit_length, "last log term", last_log_term, "election term", election_term)
         if (latest_ack != -1 
             and latest_ack > commit_length
             and last_log_term == election_term):
             for i in range(commit_length, latest_ack):
                 # TODO: DELIVER LOG TO APP
-                pass
+                self.app.executing_log(stable_vars['log'], i)
         
             self.stable_storage.update("commit_length", latest_ack)
 
@@ -610,6 +611,14 @@ class RaftNode:
         self.votes_received = 0
         stable_vars = self.stable_storage.load()
 
+        if (request['command'] == 'request_log'):
+            response = ExecuteResp({
+                "status": RespStatus.SUCCESS.value,
+                "address": self.address,
+                "log": stable_vars["log"],
+            })
+            return self.msg_parser.serialize(response)
+
         log = Log({
             "term": stable_vars["election_term"],
             "command": request["command"],
@@ -622,8 +631,6 @@ class RaftNode:
         # TODO: EVENT MANAGEMENT
         self.wait_for_votes = asyncio.Event()
 
-        # for i in range(self.lst_vars.len()):
-        #     addr = self.lst_vars.cluster_addr_list(i)
         for id in self.lst_vars.ids():
             elmt = self.lst_vars.elmt(id)
             addr = elmt["addr"]
@@ -636,23 +643,7 @@ class RaftNode:
             await self.wait_for_votes.wait()
 
         if self.lst_vars.len() > 1:
-            asyncio.get_event_loop().run_until_complete(wait_for_votes())
-
-
-        # TODO: Execute Command
-        stable_vars["commit_length"] += 1
-        self.stable_storage.update("commit_length", stable_vars["commit_length"])
-
-        # for addr in self.cluster_addr_list:
-        # for i in range(self.lst_vars.len()):
-        #     addr = self.lst_vars.cluster_addr_list(i)
-        for id in self.lst_vars.ids():
-            elmt = self.lst_vars.elmt(id)
-            addr = elmt["addr"]
-
-            if addr == self.address:
-                continue
-            asyncio.create_task(self.__send_commit_log(addr, stable_vars["commit_length"]))            
+            asyncio.get_running_loop().run_until_complete(wait_for_votes())     
 
         response = ExecuteResp({
             "status": RespStatus.SUCCESS.value,
@@ -673,14 +664,6 @@ class RaftNode:
             self.votes_received += 1
             if self.votes_received >= (self.lst_vars.len() // 2 + 1):
                 self.wait_for_votes.set()
-        
-    async def __send_commit_log(self, addr: Address, commit_length: int):
-        stable_vars = self.stable_storage.load()
-        msg = CommitLogReq({
-            commit_length: stable_vars["commit_length"],
-        })
-        self.rpc_handler.request(
-            addr, RaftNode.FuncRPC.COMMIT_LOG.value, msg)
 
     def get_status(self, json_request: str) -> str:
         request = self.msg_parser.deserialize(json_request)

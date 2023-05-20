@@ -1,7 +1,7 @@
 from Address import Address
 from RaftNode import RaftNode
 from xmlrpc.server import SimpleXMLRPCServer
-# from app import MessageQueue
+from app import MessageQueue
 import sys
 
 
@@ -10,9 +10,8 @@ def start_serving(addr: Address, contact_node_addr: Address):
     with SimpleXMLRPCServer((addr.ip, addr.port)) as server:
         server.register_introspection_functions()
         server.register_instance(
-            RaftNode(None, addr, contact_node_addr)) # TODO : Add MessageQueue
-        server.serve_forever()
-
+            RaftNode(MessageQueue(), addr, contact_node_addr))
+        server.serve_forever()       
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:
