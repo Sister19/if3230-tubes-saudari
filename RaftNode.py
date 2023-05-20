@@ -1,5 +1,6 @@
 import asyncio
-from threading import Thread
+from threading import Thread, Timer, Event
+import threading
 from xmlrpc.client import ServerProxy
 from typing import Any, List, Set, Dict
 from enum import Enum
@@ -75,8 +76,8 @@ class RaftNode:
 
     class NodeType(Enum):
         LEADER = 1
-        CANDIDATE = 2
-        FOLLOWER = 3
+        CANDIDATE = 4
+        FOLLOWER = 5
 
     class FuncRPC(Enum):
         APPLY_MEMBERSHIP = "apply_membership"
@@ -145,6 +146,7 @@ class RaftNode:
     cluster_leader_addr : Address
     lst_vars: LstVars
     votes_received: Set[Address]
+    loop_timer: Timer
 
     def __init__(self, application: Any, addr: Address, contact_addr: Address = None):
         socket.setdefaulttimeout(RaftNode.RPC_TIMEOUT)
@@ -171,28 +173,43 @@ class RaftNode:
         else:
             self.__try_to_apply_membership(contact_addr)
         
-        self.__init_heartbeat()
-        self.__init_timeout()
+        self.interrupt_event = Event()
+        Thread(target=self.__tebak).start()
+
+    def __tebak(self):
+        self.__init_loop()
+        while True:
+            self.__interrupt_task()
+
+
+    def __init_loop(self):
+        if self.type == RaftNode.NodeType.LEADER:
+            self.loop_timer = Timer(RaftNode.HEARTBEAT_INTERVAL, self.__leader_heartbeat)
+        else:
+            election_timeout = random.uniform(
+                RaftNode.ELECTION_TIMEOUT_MIN, RaftNode.ELECTION_TIMEOUT_MAX)
+            print("election_timeout", election_timeout)
+            self.loop_timer = Timer(election_timeout, self.__callback_election_interval)
+        self.loop_timer.start()
+
+    def __interrupt_task(self):
+        print(time.time())
+        self.interrupt_event.wait()
+        print(time.time())
+        self.loop_timer.cancel()
+        self.loop_timer = None
+        self.__init_loop()
+        self.interrupt_event.clear()
+
+
+    def __interrupt_and_restart_loop(self):
+        self.interrupt_event.set()
 
     def __callback_election_interval(self):
-        self.__print_log("callback election interval")
+        print([x.name for x in threading.enumerate()])
         if self.type == RaftNode.NodeType.LEADER:
-            self.__print_log("leader, cancel election timeout")
             return
-
-        # TODO: confirm
-        self.__print_log("timeout, request vote")
         self.__req_vote()
-
-    def __cancel_election_timeout(self):
-        self.election_interval.reset()
-
-    def __init_timeout(self):
-        self.election_interval = SetInterval(
-            self.__callback_election_interval,
-            self.election_timeout,
-        )
-        self.election_interval.start()
 
     def __on_recover_crash(self):
         self.__try_fetch_stable()
@@ -224,6 +241,7 @@ class RaftNode:
 
 
     def __req_vote(self):
+        self.loop_timer.finished.set()
         self.__print_log("Request votes")
         stable_vars = self.stable_storage.load()
 
@@ -249,11 +267,8 @@ class RaftNode:
         for id in self.lst_vars.ids():
             self.__print_log(f"Sending request vote to {id}")
             elmt = self.lst_vars.elmt(id)
-            # TODO: make sure async
             asyncio.run(self.__try_request_vote(elmt["addr"], msg))
 
-        # TODO: start timer
-        # TODO: pindahin start timer ke sini
 
     async def __try_request_vote(self, addr_dest: Address, msg: VoteReq):
         response: VoteResp = self.rpc_handler.request(
@@ -274,8 +289,7 @@ class RaftNode:
             self.votes_received.add(str(voter_id))
             if len(self.votes_received) >= (self.lst_vars.len() + 1) / 2:
                 self.__initialize_as_leader()
-                # TODO: cancel election timer
-                self.__cancel_election_timeout()
+                self.__interrupt_and_restart_loop()
                 # TODO: replicate log for all cluster nodes
         elif voter_term > stable_vars["election_term"]:
             stable_vars["election_term"] = voter_term
@@ -283,8 +297,7 @@ class RaftNode:
             self.stable_storage.storeAll(stable_vars)
 
             self.type = RaftNode.NodeType.FOLLOWER
-            # TODO: cancel election timer
-            self.__cancel_election_timeout()        
+            self.__interrupt_and_restart_loop()        
     
     def request_vote(self, json_request: str):
         request: VoteReq = self.msg_parser.deserialize(json_request)
@@ -331,84 +344,76 @@ class RaftNode:
     def __print_log(self, text: str): # FIXME: Plis jangan print_log gua kira ngeprint isi log
         print(f"[{self.address}] [{time.strftime('%H:%M:%S')}] [{self.type}] {text}")
 
-    def __init_heartbeat(self):
-        # TODO : Inform to all node this is new leader
-        self.heartbeat_thread = Thread(target=asyncio.run, args=[ #FIXME: berarti klo bukan leader, thread loopnya beda lagi?
-                                       self.__leader_heartbeat()])
-        self.heartbeat_thread.start()
-
     def __initialize_as_leader(self):
         self.__print_log("Initialize as leader node...")
         self.cluster_leader_addr = self.address # FIXME: cluster_leader_addr = voted_for? ato beda? bisa disamain kok
         self.type = RaftNode.NodeType.LEADER
 
-    async def __leader_heartbeat(self):
-        # TODO : Send periodic heartbeat
-        while True:
-            if self.type == RaftNode.NodeType.LEADER:
-                self.__print_log("Sending heartbeat...")
-                pass # FIXME: WHaat?
+    def __leader_heartbeat(self):
+        if self.type == RaftNode.NodeType.LEADER:
+            for id in self.lst_vars.ids():
+                asyncio.run(self.__send_heartbeat(id))
+        self.__interrupt_and_restart_loop()
+    
+    async def __send_heartbeat(self, id):
+        elmt = self.lst_vars.elmt(id)
+        addr = elmt["addr"]
 
-                # TODO : Send heartbeat to all node
-                for id in self.lst_vars.ids():
-                    elmt = self.lst_vars.elmt(id)
-                    addr = elmt["addr"]
+        if addr == self.address:
+            return
 
-                    if addr == self.address:
-                        continue
+        stable_vars = self.stable_storage.load()
 
-                    stable_vars = self.stable_storage.load()
+        prefix_len = elmt["sent_length"]
+        suffix = stable_vars["log"][prefix_len:]
+        prefix_term = 0
+        if prefix_len > 0:
+            prefix_term = stable_vars["log"][prefix_len - 1]["term"]
 
-                    prefix_len = elmt["sent_length"]
-                    suffix = stable_vars["log"][prefix_len:]
-                    prefix_term = 0
-                    if prefix_len > 0:
-                        prefix_term = stable_vars["log"][prefix_len - 1]["term"]
+        msg = HeartbeatReq({
+            "leader_addr": self.address,
+            "term": stable_vars["election_term"],
+            "prefix_len": prefix_len,
+            "prefix_term": prefix_term,
+            "suffix": suffix,
+            "commit_length": stable_vars["commit_length"],
+        })
+        
+        resp: HeartbeatResp = self.rpc_handler.request(
+            addr,
+            RaftNode.FuncRPC.HEARTBEAT.value,
+            msg,
+        )
 
-                    msg = HeartbeatReq({
-                        "leader_addr": self.address,
-                        "term": stable_vars["election_term"],
-                        "prefix_len": prefix_len,
-                        "prefix_term": prefix_term,
-                        "suffix": suffix,
-                        "commit_length": stable_vars["commit_length"],
-                    })
-                    
-                    resp: HeartbeatResp = self.rpc_handler.request(
-                        addr,
-                        RaftNode.FuncRPC.HEARTBEAT.value,
-                        msg,
-                    )
+        if resp['status'] != "success":
+            return
 
-                    resp_term = resp["term"]
-                    ack = resp["ack"]
-                    success_append = resp["success_append"]
+        resp_term = resp["term"]
+        ack = resp["ack"]
+        success_append = resp["success_append"]
 
-                    acked_len = elmt["acked_length"]
+        acked_len = elmt["acked_length"]
 
-                    stable_vars = self.stable_storage.load()
+        stable_vars = self.stable_storage.load()
 
-                    if resp_term == stable_vars["election_term"] and self.type == RaftNode.NodeType.LEADER:
-                        if success_append and ack >= acked_len:
-                            elmt["sent_length"] = ack
-                            elmt["acked_length"] = ack
-                            self.lst_vars.store(id, elmt)
-                            self.__commit_log_entries()
-                        elif elmt["sent_length"] > 0: #self.lst_vars.sent_length(follower_idx) > 0:
-                            elmt["sent_length"] = elmt["sent_length"] - 1
-                            self.lst_vars.store(id, elmt)
+        if resp_term == stable_vars["election_term"] and self.type == RaftNode.NodeType.LEADER:
+            if success_append and ack >= acked_len:
+                elmt["sent_length"] = ack
+                elmt["acked_length"] = ack
+                self.lst_vars.store(id, elmt)
+                self.__commit_log_entries()
+            elif elmt["sent_length"] > 0: #self.lst_vars.sent_length(follower_idx) > 0:
+                elmt["sent_length"] = elmt["sent_length"] - 1
+                self.lst_vars.store(id, elmt)
 
-                            # TODO: REPLICATE LOG
-                    elif resp_term > stable_vars["election_term"]:
-                        stable_vars["election_term"] = resp_term
-                        stable_vars["voted_for"] = None
-                        self.stable_storage.storeAll(stable_vars)
-                        self.type = RaftNode.NodeType.FOLLOWER
-                        # TODO: cancel election timer
-                        self.__cancel_election_timeout()
-                        break
-
-            await asyncio.sleep(RaftNode.HEARTBEAT_INTERVAL)
+                # TODO: REPLICATE LOG
+        elif resp_term > stable_vars["election_term"]:
+            stable_vars["election_term"] = resp_term
+            stable_vars["voted_for"] = None
+            self.stable_storage.storeAll(stable_vars)
+            self.type = RaftNode.NodeType.FOLLOWER
+            self.__interrupt_and_restart_loop()
+            return
 
     def __try_to_apply_membership(self, contact_addr: Address):
         msg = ApplyMembershipReq(self.address)
@@ -443,8 +448,7 @@ class RaftNode:
             stable_vars["voted_for"] = None
             stable_vars = self.stable_storage.storeAll(stable_vars)
             
-            # TODO: cancel election timer
-            self.__cancel_election_timeout()
+            self.__interrupt_and_restart_loop()
         
         if req_term == stable_vars["election_term"]:
             self.type = RaftNode.NodeType.FOLLOWER

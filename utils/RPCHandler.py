@@ -46,7 +46,7 @@ class RPCHandler:
         if response["status"] == RespStatus.FAILED.value:
             print("Failed to send request")
             # exit(1)
-            raise Exception(response["error"])
+            # raise Exception(response["error"])
 
         response["address"] = redirect_addr
         return response
