@@ -20,7 +20,7 @@ class Address(dict):
         return self["ip"] == other["ip"] and self["port"] == other["port"]
 
     def __ne__(self, other: "Address"):
-        return self.ip != other.ip or self.port != other.port
+        return self["ip"] != other["ip"] or self["port"] != other["port"]
 
     def data(self) -> AddressData:
         return AddressData(ip=self.ip, port=self.port)

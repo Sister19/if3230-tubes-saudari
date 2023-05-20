@@ -17,7 +17,7 @@ from msgs.AddLogMsg import AddLogReq, AddLogResp
 from msgs.CommitLogMsg import CommitLogReq, CommitLogResp
 from msgs.BaseMsg import BaseReq, BaseResp, RespStatus
 from msgs.GetStatusMsg import GetStatusReq, GetStatusResp
-from msgs.GetStatusClusterMsg import GetStatusClusterReq, GetStatusClusterResp
+from msgs.GetClusterMsg import GetClusterReq, GetClusterResp
 from typing import TypedDict, TypeVar, Generic
 from msgs.ErrorMsg import ErrorResp
 from utils.RPCHandler import RPCHandler
@@ -162,7 +162,7 @@ class RaftNode:
         self.rpc_handler: RPCHandler = RPCHandler()
 
         self.election_timeout = random.uniform(
-            RaftNode.ELECTION_TIMEOUT_MIN, RaftNode.ELECTION_TIMEOUT_MAX) * 10
+            RaftNode.ELECTION_TIMEOUT_MIN, RaftNode.ELECTION_TIMEOUT_MAX)
         self.__print_log(f"election timeout: {self.election_timeout}")
 
         if contact_addr is None:
@@ -691,6 +691,7 @@ class RaftNode:
             "status":            RespStatus.SUCCESS.value,
             "address": self.address,
             "data": {
+                "address": self.address,
                 "election_term":     stable_vars["election_term"],
                 "voted_for": stable_vars["voted_for"],
                 "log":               stable_vars["log"],
@@ -704,9 +705,9 @@ class RaftNode:
 
         return self.msg_parser.serialize(response)
     
-    def get_status_cluster(self, json_request: str):
+    def get_cluster(self, json_request: str):
         if self.type != RaftNode.NodeType.LEADER:
-            return self.msg_parser.serialize(GetStatusClusterResp({
+            return self.msg_parser.serialize(GetClusterResp({
                 "status": RespStatus.REDIRECTED.value,
                 "address": self.cluster_leader_addr,
             }))
@@ -714,22 +715,15 @@ class RaftNode:
         request = self.msg_parser.deserialize(json_request)
         self.__print_log(f"Request : {request}")
 
-        addrs = [
-            self.lst_vars.elmt(id)["addr"]
+        cluster = [
+            self.lst_vars.elmt(id)
             for id in self.lst_vars.ids()
         ]
-        responses: List[GetStatusResp] = [
-            self.rpc_handler.request(
-                addr, 
-                RaftNode.FuncRPC.GET_STATUS.value, 
-                GetStatusReq())
-            for addr in addrs
-        ]
 
-        response = GetStatusClusterResp({
+        response = GetClusterResp({
             "status":            RespStatus.SUCCESS.value,
             "address": self.address,
-            "data": [resp["data"] for resp in responses]
+            "data": cluster
         })
 
         return self.msg_parser.serialize(response)
