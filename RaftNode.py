@@ -393,7 +393,7 @@ class RaftNode:
                             elmt["sent_length"] = ack
                             elmt["acked_length"] = ack
                             self.lst_vars.store(id, elmt)
-                            self.__commit_log_entries()
+                            self.__commitlogentries()
                         elif elmt["sent_length"] > 0: #self.lst_vars.sent_length(follower_idx) > 0:
                             elmt["sent_length"] = elmt["sent_length"] - 1
                             self.lst_vars.store(id, elmt)
@@ -462,6 +462,7 @@ class RaftNode:
             "term": stable_vars["election_term"],
         })
 
+
         if req_term == stable_vars["election_term"] and log_ok:
             self.__append_entries(prefix_len, leader_commit, suffix)
             ack = prefix_len + len(suffix)
@@ -476,7 +477,7 @@ class RaftNode:
     def __append_entries(self, prefix_len: int, leader_commit: int, suffix: List[Log]):
         stable_vars = self.stable_storage.load()
         log = stable_vars["log"]
-
+        print("MASUK APPEND ENTRIIES")
         if len(suffix) > 0 and len(log) > prefix_len:
             idx = min(len(log), prefix_len + len(suffix)) - 1
             if log[idx]["term"] != suffix[idx - prefix_len]["term"]:
@@ -537,6 +538,22 @@ class RaftNode:
                 self.app.executing_log(stable_vars['log'], i)
         
             self.stable_storage.update("commit_length", latest_ack)
+    
+    def __commitlogentries(self):
+        stable_vars = self.stable_storage.load()
+        min_acks = math.ceil((self.lst_vars.len() + 1) / 2)
+        while stable_vars["commit_length"] < len(stable_vars["log"]):
+            acks = 0
+            for id in self.lst_vars.ids():
+                if self.lst_vars.elmt(id)["acked_length"] >= stable_vars["commit_length"]:
+                    acks += 1
+                
+            if (acks >= min_acks):
+                self.app.executing_log(stable_vars['log'], stable_vars["commit_length"])
+                stable_vars["commit_length"] += 1
+                self.stable_storage.update("commit_length", stable_vars["commit_length"])
+            else:
+                break
 
 
     def append_log(self, json_request: str) -> str:
@@ -628,22 +645,7 @@ class RaftNode:
         stable_vars["log"].append(log)
         self.stable_storage.update("log", stable_vars["log"])
 
-        # TODO: EVENT MANAGEMENT
-        self.wait_for_votes = asyncio.Event()
-
-        for id in self.lst_vars.ids():
-            elmt = self.lst_vars.elmt(id)
-            addr = elmt["addr"]
-
-            if addr == self.address:
-                continue
-            asyncio.create_task(self.__send_append_log(addr, log))
-
-        async def wait_for_votes():
-            await self.wait_for_votes.wait()
-
-        if self.lst_vars.len() > 1:
-            asyncio.get_running_loop().run_until_complete(wait_for_votes())     
+        # # TODO: EVENT MANAGEMENT  
 
         response = ExecuteResp({
             "status": RespStatus.SUCCESS.value,

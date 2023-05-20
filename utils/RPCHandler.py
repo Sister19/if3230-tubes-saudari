@@ -15,12 +15,9 @@ class RPCHandler:
         json_request = self.msg_parser.serialize(msg)
         print(f"Sending request to {addr.ip}:{addr.port}...")
         rpc_function = getattr(node, rpc_name)
-        print("RPC_NAME", rpc_name)
-        print("node", node)
 
         try:
             response = rpc_function(json_request)
-            print("RESPONSE", response)
             print(f"Response from {addr.ip}:{addr.port}: {response}")
             return response
         except Exception as e:
