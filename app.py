@@ -16,15 +16,12 @@ class MessageQueue:
     def executing_log(self, log: Log, i: int):
         # get the value inside the command queue
         raw_command = log[i]['command']
-        command_queue = re.search('queue((.*))', raw_command)
-        
-        print("PLEASE MASUKK YUKK")
-        if (command_queue):
+        command_queue = re.search(r'\bqueue\((.*?)\)', raw_command)
+
+        if (command_queue != None and command_queue.group(1)):
             self.__enqueue(command_queue.group(1))
 
-
-        if (raw_command == "dequeue()"):
+        elif (raw_command == "dequeue()"):
             result = self.__dequeue()
             log[i]['value'] = result
-            print("should be executed", log[i])
         
