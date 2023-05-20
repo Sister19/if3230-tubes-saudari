@@ -16,13 +16,15 @@ from msgs.VoteMsg import VoteReq, VoteResp
 from msgs.AddLogMsg import AddLogReq, AddLogResp
 from msgs.CommitLogMsg import CommitLogReq, CommitLogResp
 from msgs.BaseMsg import BaseReq, BaseResp, RespStatus
+from msgs.GetStatusMsg import GetStatusReq, GetStatusResp
+from msgs.GetStatusClusterMsg import GetStatusClusterReq, GetStatusClusterResp
 from typing import TypedDict, TypeVar, Generic
 from msgs.ErrorMsg import ErrorResp
 from utils.RPCHandler import RPCHandler
 import json
 import math
 import random
-from utils.time import ResettableInterval
+from utils.SetInterval import SetInterval
 
 T = TypeVar('T', bound=TypedDict)
 
@@ -82,6 +84,8 @@ class RaftNode:
         HEARTBEAT = "heartbeat"
         APPEND_LOG = "append_log"
         COMMIT_LOG = "commit_log"
+        GET_STATUS = "get_status"
+        GET_STATUS_CLUSTER = "get_status_cluster"
     
     class StableVars(TypedDict):
         election_term: int
@@ -128,6 +132,9 @@ class RaftNode:
             self.map = {}
             for addr in addrs:
                 self.append_addr(addr)
+        
+        def copy_data(self):
+            return self.map.copy()
 
     address: Address
     app: Any
@@ -154,8 +161,9 @@ class RaftNode:
         self.msg_parser: MsgParser = MsgParser()
         self.rpc_handler: RPCHandler = RPCHandler()
 
-        self.election_timeout = random.randrange(
-            RaftNode.ELECTION_TIMEOUT_MIN, RaftNode.ELECTION_TIMEOUT_MAX)
+        self.election_timeout = random.uniform(
+            RaftNode.ELECTION_TIMEOUT_MIN, RaftNode.ELECTION_TIMEOUT_MAX) * 10
+        self.__print_log(f"election timeout: {self.election_timeout}")
 
         if contact_addr is None:
             self.lst_vars.append_addr(self.address)
@@ -170,12 +178,6 @@ class RaftNode:
         self.__print_log("callback election interval")
         if self.type == RaftNode.NodeType.LEADER:
             self.__print_log("leader, cancel election timeout")
-            self.timeout = False
-            return
-
-        if not self.timeout:
-            self.__print_log("not timeout, reset election timeout")
-            self.timeout = True
             return
 
         # TODO: confirm
@@ -183,18 +185,14 @@ class RaftNode:
         self.__req_vote()
 
     def __cancel_election_timeout(self):
-        self.timeout = False
         self.election_interval.reset()
 
     def __init_timeout(self):
-        self.timeout = False
-        self.election_interval = ResettableInterval(
+        self.election_interval = SetInterval(
+            self.__callback_election_interval,
             self.election_timeout,
-            self.__callback_election_interval
         )
         self.election_interval.start()
-        #set_interval(
-            #self.__callback_election_interval, self.election_timeout)
 
     def __on_recover_crash(self):
         self.__try_fetch_stable()
@@ -580,6 +578,12 @@ class RaftNode:
 
     # Client RPCs
     def apply_membership(self, json_request: str) -> str: #FIXME: apply membership pake consensus, dan blocking 1 persatu
+        if self.type != RaftNode.NodeType.LEADER:
+            return self.msg_parser.serialize(ApplyMembershipResp({
+                "status": RespStatus.REDIRECTED.value,
+                "address": self.cluster_leader_addr,
+            }))
+
         # TODO : Implement apply_membership
         request = self.msg_parser.deserialize(json_request)
         self.__print_log(f"Request : {request}")
@@ -677,3 +681,57 @@ class RaftNode:
         })
         self.rpc_handler.request(
             addr, RaftNode.FuncRPC.COMMIT_LOG.value, msg)
+
+    def get_status(self, json_request: str) -> str:
+        request = self.msg_parser.deserialize(json_request)
+        self.__print_log(f"Request : {request}")
+
+        stable_vars = self.stable_storage.load()
+        response = GetStatusResp({
+            "status":            RespStatus.SUCCESS.value,
+            "address": self.address,
+            "data": {
+                "election_term":     stable_vars["election_term"],
+                "voted_for": stable_vars["voted_for"],
+                "log":               stable_vars["log"],
+                "commit_length":     stable_vars["commit_length"],
+                "type": self.type.value,
+                "cluster_leader_addr": self.cluster_leader_addr,
+                "votes_received": list(self.votes_received),
+                "cluster_elmts": self.lst_vars.copy_data(),
+            }
+        })
+
+        return self.msg_parser.serialize(response)
+    
+    def get_status_cluster(self, json_request: str):
+        if self.type != RaftNode.NodeType.LEADER:
+            return self.msg_parser.serialize(GetStatusClusterResp({
+                "status": RespStatus.REDIRECTED.value,
+                "address": self.cluster_leader_addr,
+            }))
+        
+        request = self.msg_parser.deserialize(json_request)
+        self.__print_log(f"Request : {request}")
+
+        addrs = [
+            self.lst_vars.elmt(id)["addr"]
+            for id in self.lst_vars.ids()
+        ]
+        responses: List[GetStatusResp] = [
+            self.rpc_handler.request(
+                addr, 
+                RaftNode.FuncRPC.GET_STATUS.value, 
+                GetStatusReq())
+            for addr in addrs
+        ]
+
+        response = GetStatusClusterResp({
+            "status":            RespStatus.SUCCESS.value,
+            "address": self.address,
+            "data": [resp["data"] for resp in responses]
+        })
+
+        return self.msg_parser.serialize(response)
+
+
