@@ -27,15 +27,15 @@ import math
 import random
 from utils.SetInterval import SetInterval
 from msgs.RequestLogMsg import RequestLogReq, RequestLogResp
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from StableStorage import StableStorage
 
 class RaftNode:
     # FIXME: knp di dalem class? mending taro luar biar bisa dipake
-    HEARTBEAT_INTERVAL = 2
-    ELECTION_TIMEOUT_MIN = 4
-    ELECTION_TIMEOUT_MAX = 6
-    RPC_TIMEOUT = 1
+    HEARTBEAT_INTERVAL = 4
+    ELECTION_TIMEOUT_MIN = 8
+    ELECTION_TIMEOUT_MAX = 12
+    RPC_TIMEOUT = 12
 
     class NodeType(Enum):
         LEADER = 1
@@ -140,8 +140,6 @@ class RaftNode:
         # additional vars
         self.msg_parser: MsgParser = MsgParser()
         self.rpc_handler: RPCHandler = RPCHandler()
-        self.membership_vote = 0
-        self.membership_consensus_event = threading.Event()
         self.membership_lock = threading.Lock()
         self.temp_membership = None
         self.threadpool : ThreadPoolExecutor = ThreadPoolExecutor()
@@ -621,11 +619,6 @@ class RaftNode:
 
         return self.msg_parser.serialize(response)
 
-    async def __wait_for_membership_votes(self):
-        print("wait for membership votes")
-        print(self.membership_consensus_event)
-        await self.membership_consensus_event.wait(RaftNode.RPC_TIMEOUT)
-        print("wait for membership votes done")
 
     def request_log(self, json_request: str):
         if self.type != RaftNode.NodeType.LEADER:
@@ -658,8 +651,6 @@ class RaftNode:
                 "status": RespStatus.FAILED.value,
                 "reason": "Cannot remove leader",
             }))
-        print("masuk sini")
-        print(self.membership_vote, self.membership_consensus_event)
 
         if not self.membership_lock.acquire(blocking=False):
             return self.msg_parser.serialize(ApplyMembershipResp({
@@ -669,23 +660,23 @@ class RaftNode:
         
         update_addr = Address(request["ip"], request['port'])
         
+        send_addrs = [addr for addr in self.lst_vars.copy_addrs() if addr != self.address]
 
-        self.membership_vote = 0
-        self.membership_consensus_event = threading.Event()
+        futures = [self.threadpool.submit(self.__send_update_address, send_addr, update_addr, request["insert"]) for send_addr in send_addrs]
 
-
-        for addr in self.lst_vars.copy_addrs():
-            if addr != self.address:
-                self.threadpool.submit(self.__send_update_address, addr, update_addr, request["insert"])
-
+        membership_vote = 0
         if self.lst_vars.len() > 1:
-            self.membership_consensus_event.wait(RaftNode.RPC_TIMEOUT)
-            self.membership_lock.release()
-            if not self.membership_consensus_event.
-                return self.msg_parser.serialize(ApplyMembershipResp({
-                    "status": RespStatus.FAILED.value,
-                    "reason": "Timeout",
-                }))
+            start_time = time.time()
+            for future in as_completed(futures):
+                try:
+                    response = future.result()
+                    print("RESPONSE : ", response, time.time() - start_time)
+                    start_time = time.time()
+                    membership_vote += 1
+                    if (membership_vote + 1 > self.lst_vars.len() // 2):
+                        break
+                except TimeoutError:
+                    pass           
 
 
         for addr in self.lst_vars.copy_addrs():
@@ -700,8 +691,6 @@ class RaftNode:
                 self.lst_vars.remove_addr(update_addr)
 
         self.__interrupt_and_restart_loop()
-        self.membership_consensus_event.clear()
-        self.membership_vote = 0
         
         self.membership_lock.release()
 
@@ -721,13 +710,9 @@ class RaftNode:
         })
         print("masuk sini", addr, update_addr, insert)
         resp: UpdateAddrResp = self.rpc_handler.request(addr, RaftNode.FuncRPC.UPDATE_ADDRESS.value, request)
-        if resp['status'] == RespStatus.SUCCESS.value:
-            self.membership_vote += 1
-            print("masuk sini")
-            print(self.membership_vote, self.membership_consensus_event, self.lst_vars.len() //2)
-            if self.membership_vote + 1 > (self.lst_vars.len() // 2):
-                print("EVENT SET")
-                self.membership_consensus_event.set()
+        if resp['status'] != "success":
+            return 0
+        return 1
 
     def __send_commit_address(self, addr: Address, update_addr: Address, insert: bool):
         request = CommitUpdateAddrReq({
