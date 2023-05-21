@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react'
 import { IClusterElmt, INodeStatus } from './types'
-import axios from 'axios'
+import axios, {AxiosError} from 'axios'
+import { ToastContainer, toast } from 'react-toastify';
+import 'react-toastify/dist/ReactToastify.css';
 
 function App() {
   const [nodeStatus, setNodeStatus] = useState<INodeStatus[]>([])
@@ -15,7 +17,8 @@ function App() {
       setNodeStatus(res.data)
     } catch (err) {
       console.log(err)
-      alert(err)
+      const msg = (err as AxiosError).message
+      toast(msg)
       setNodeStatus([])
     }
   }
@@ -30,10 +33,11 @@ function App() {
     } else {
       fetchNodeStatus()
     }
-  }, [continous])
+  }, [continous, ip, port])
 
   return (
     <div>
+      <ToastContainer />
       <div>
         <div>
           <label htmlFor="ip">IP: </label>

@@ -31,7 +31,7 @@ async def get_statuses(ip: str, port: int):
     statuses: List[GetStatusResp] = await asyncio.gather(*[async_req_status_node(x["addr"]) for x in cluster_elmts])
     print("statuses",statuses)
 
-    return [x["data"] for x in statuses]
+    return [x["data"] for x in statuses if x["status"] == "success"]
 
 
 @app.route('/cluster', methods=["GET"])
