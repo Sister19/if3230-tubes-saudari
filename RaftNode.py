@@ -1,4 +1,3 @@
-import asyncio
 from threading import Thread, Timer, Event
 import threading
 from xmlrpc.client import ServerProxy
@@ -29,6 +28,7 @@ import math
 import random
 from utils.SetInterval import SetInterval
 from msgs.RequestLogMsg import RequestLogReq, RequestLogResp
+from concurrent.futures import ThreadPoolExecutor
 
 T = TypeVar('T', bound=TypedDict)
 
@@ -180,9 +180,12 @@ class RaftNode:
         # additional vars
         self.msg_parser: MsgParser = MsgParser()
         self.rpc_handler: RPCHandler = RPCHandler()
-        self.membership_vote = None
-        self.membership_consensus_event = None
+        self.membership_vote = 0
+        self.membership_consensus_event = threading.Event()
+        self.membership_lock = threading.Lock()
         self.temp_membership = None
+        self.threadpool : ThreadPoolExecutor = ThreadPoolExecutor()
+
 
         self.election_timeout = random.uniform(
             RaftNode.ELECTION_TIMEOUT_MIN, RaftNode.ELECTION_TIMEOUT_MAX)
@@ -211,6 +214,9 @@ class RaftNode:
                 RaftNode.ELECTION_TIMEOUT_MIN, RaftNode.ELECTION_TIMEOUT_MAX)
             self.loop_timer = Timer(election_timeout, self.__callback_election_interval)
         self.loop_timer.start()
+        print()
+        print(self.lst_vars.ids())
+        print()
 
     def __interrupt_task(self):
         self.interrupt_event.wait()
@@ -262,7 +268,7 @@ class RaftNode:
         stable_vars = self.stable_storage.load()
 
         stable_vars = self.stable_storage.update('election_term', stable_vars['election_term'] + 1)
-        stable_vars = self.stable_storage.update('voted_for', self.address) # FIXME: voted_for = leader_addr? ato beda? bisa disamain kok
+        stable_vars = self.stable_storage.update('voted_for', self.address)
         self.type = RaftNode.NodeType.CANDIDATE
         self.votes_received = set[Address]()
         self.votes_received.add(str(self.address))
@@ -271,22 +277,20 @@ class RaftNode:
         if len(stable_vars["log"]) > 0:
             last_term = stable_vars["log"][-1]["term"]
 
-        # FIXME: Check konsistensi log juga
-        
         msg = VoteReq({
             'voted_for': stable_vars["voted_for"], 
             'term': stable_vars["election_term"],
             'log_length': len(stable_vars["log"]),
-            'last_term': last_term, # FIXME: Last term buat apa?
+            'last_term': last_term, 
         })
 
         for id in self.lst_vars.ids():
             self.__print_log(f"Sending request vote to {id}")
             elmt = self.lst_vars.elmt(id)
-            asyncio.run(self.__try_request_vote(elmt["addr"], msg))
+            self.threadpool.submit(self.__try_request_vote, elmt['addr'], msg) # Async
 
 
-    async def __try_request_vote(self, addr_dest: Address, msg: VoteReq):
+    def __try_request_vote(self, addr_dest: Address, msg: VoteReq):
         response: VoteResp = self.rpc_handler.request(
             addr_dest,
             RaftNode.FuncRPC.REQUEST_VOTE.value,
@@ -360,22 +364,21 @@ class RaftNode:
         return self.msg_parser.serialize(response)
         
 
-    def __print_log(self, text: str): # FIXME: Plis jangan print_log gua kira ngeprint isi log
+    def __print_log(self, text: str):
         print(f"[{self.address}] [{time.strftime('%H:%M:%S')}] [{self.type}] {text}")
 
     def __initialize_as_leader(self):
         self.__print_log("Initialize as leader node...")
-        self.cluster_leader_addr = self.address # FIXME: cluster_leader_addr = voted_for? ato beda? bisa disamain kok
+        self.cluster_leader_addr = self.address
         self.type = RaftNode.NodeType.LEADER
 
     def __leader_heartbeat(self):
         if self.type == RaftNode.NodeType.LEADER:
-            print(self.lst_vars.ids())
             for id in self.lst_vars.ids():
-                asyncio.run(self.__send_heartbeat(id))
+                self.threadpool.submit(self.__send_heartbeat(id)) # Async
         self.__interrupt_and_restart_loop()
-    
-    async def __send_heartbeat(self, id):
+
+    def __send_heartbeat(self, id):
         elmt = self.lst_vars.elmt(id)
         addr = elmt["addr"]
 
@@ -435,6 +438,7 @@ class RaftNode:
             self.__interrupt_and_restart_loop()
             return
 
+    # Gaperlu async
     def __try_to_apply_membership(self, contact_addr: Address):
         msg = ApplyMembershipReq({
             "ip": self.address.ip,
@@ -584,8 +588,6 @@ class RaftNode:
             "address": self.address,
         })
 
-        print("TEMP MEMBERSHIP", self.temp_membership)
-
         return self.msg_parser.serialize(response)
 
     def commit_update_address(self, json_request:str) -> str:
@@ -607,8 +609,6 @@ class RaftNode:
         else:
             if str(addr) in self.lst_vars.ids():
                 self.lst_vars.remove_addr(addr)
-
-        print(f"Membership : {self.lst_vars.ids()}")
 
         return self.msg_parser.serialize(CommitUpdateAddrResp({
             "status": RespStatus.SUCCESS.value,
@@ -695,7 +695,7 @@ class RaftNode:
         print("masuk sini")
         print(self.membership_vote, self.membership_consensus_event)
 
-        if (not self.membership_vote is None) or (not self.membership_consensus_event is None):
+        if not self.membership_lock.acquire(blocking=False):
             return self.msg_parser.serialize(ApplyMembershipResp({
                 "status": RespStatus.FAILED.value,
                 "reason": "There is an ongoing membership change",
@@ -705,23 +705,25 @@ class RaftNode:
         
 
         self.membership_vote = 0
-        self.membership_consensus_event = asyncio.Event()
+        self.membership_consensus_event = threading.Event()
 
 
         for addr in self.lst_vars.copy_addrs():
             if addr != self.address:
-                asyncio.get_event_loop().create_task(self.__send_update_address(addr,update_addr, request["insert"]))
+                self.threadpool.submit(self.__send_update_address, addr, update_addr, request["insert"])
 
         if self.lst_vars.len() > 1:
-            print("masuk sini 2")
-            asyncio.ensure_future(self.membership_consensus_event.wait())
+            self.membership_consensus_event.wait(RaftNode.RPC_TIMEOUT)
+            if not self.membership_consensus_event.is_set():
+                return self.msg_parser.serialize(ApplyMembershipResp({
+                    "status": RespStatus.FAILED.value,
+                    "reason": "Timeout",
+                }))
 
-        print("CONSENSUS EVENT DONE")
- 
 
         for addr in self.lst_vars.copy_addrs():
             if addr != self.address:
-                asyncio.get_event_loop().create_task(self.__send_commit_address(addr,update_addr, request["insert"]))
+                self.threadpool.submit(self.__send_commit_address, addr, update_addr, request["insert"])
 
         if request['insert']:
             if str(update_addr) not in self.lst_vars.ids():
@@ -732,8 +734,10 @@ class RaftNode:
 
         stable_vars = self.stable_storage.load()
         self.__interrupt_and_restart_loop()
-        self.membership_consensus_event = None
-        self.membership_vote = None
+        self.membership_consensus_event.clear()
+        self.membership_vote = 0
+        
+        self.membership_lock.release()
 
         response = ApplyMembershipResp({
             "status":            "success",
@@ -742,7 +746,7 @@ class RaftNode:
         })
         return self.msg_parser.serialize(response)
 
-    async def __send_update_address(self, addr: Address, update_addr: Address, insert: bool):
+    def __send_update_address(self, addr: Address, update_addr: Address, insert: bool):
         request = UpdateAddrReq({
             "ip": update_addr.ip,
             "port": update_addr.port,
@@ -750,14 +754,15 @@ class RaftNode:
         })
         print("masuk sini", addr, update_addr, insert)
         resp: UpdateAddrResp = self.rpc_handler.request(addr, RaftNode.FuncRPC.UPDATE_ADDRESS.value, request)
-        print("RESPONSE", resp)
         if resp['status'] == RespStatus.SUCCESS.value:
             self.membership_vote += 1
-            if self.membership_vote + 1 > self.lst_vars.len() // 2:
+            print("masuk sini")
+            print(self.membership_vote, self.membership_consensus_event, self.lst_vars.len() //2)
+            if self.membership_vote + 1 > (self.lst_vars.len() // 2):
                 print("EVENT SET")
                 self.membership_consensus_event.set()
 
-    async def __send_commit_address(self, addr: Address, update_addr: Address, insert: bool):
+    def __send_commit_address(self, addr: Address, update_addr: Address, insert: bool):
         request = CommitUpdateAddrReq({
             "ip": update_addr.ip,
             "port": update_addr.port,
@@ -808,28 +813,6 @@ class RaftNode:
                 "address": self.address,
                 "reason": str(e), 
             }))
-
-    async def __send_append_log(self, addr: Address, log: Log):
-        msg = AddLogReq({
-            "term": log["term"],
-            "command": log["command"],
-            "value": log["value"],
-        })
-        response: AddLogResp = self.rpc_handler.request(
-            addr, RaftNode.FuncRPC.APPEND_LOG.value, msg)
-        
-        if (response["status"] == RespStatus.SUCCESS.value):
-            self.votes_received += 1
-            if self.votes_received >= (self.lst_vars.len() // 2 + 1):
-                self.wait_for_votes.set()
-        
-    async def __send_commit_log(self, addr: Address, commit_length: int):
-        stable_vars = self.stable_storage.load()
-        msg = CommitLogReq({
-            commit_length: stable_vars["commit_length"],
-        })
-        self.rpc_handler.request(
-            addr, RaftNode.FuncRPC.COMMIT_LOG.value, msg)
 
     def get_status(self, json_request: str) -> str:
         request = self.msg_parser.deserialize(json_request)
