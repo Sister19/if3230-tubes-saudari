@@ -188,16 +188,12 @@ class RaftNode:
         else:
             election_timeout = random.uniform(
                 RaftNode.ELECTION_TIMEOUT_MIN, RaftNode.ELECTION_TIMEOUT_MAX)
-            print("election_timeout", election_timeout)
             self.loop_timer = Timer(election_timeout, self.__callback_election_interval)
         self.loop_timer.start()
 
     def __interrupt_task(self):
-        print(time.time())
         self.interrupt_event.wait()
-        print(time.time())
         self.loop_timer.cancel()
-        self.loop_timer = None
         self.__init_loop()
         self.interrupt_event.clear()
 
@@ -206,7 +202,6 @@ class RaftNode:
         self.interrupt_event.set()
 
     def __callback_election_interval(self):
-        print([x.name for x in threading.enumerate()])
         if self.type == RaftNode.NodeType.LEADER:
             return
         self.__req_vote()
@@ -276,6 +271,9 @@ class RaftNode:
             RaftNode.FuncRPC.REQUEST_VOTE.value,
             msg,
         )
+
+        if response['status'] != 'success':
+            return
 
         self.__print_log(f"__try_request_vote.response: {response}")
 
@@ -471,6 +469,7 @@ class RaftNode:
             ack = prefix_len + len(suffix)
             response["ack"] = ack
             response["success_append"] = True
+            self.__interrupt_and_restart_loop()
         else:
             response["ack"] = 0
             response["success_append"] = False
