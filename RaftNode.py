@@ -496,7 +496,7 @@ class RaftNode:
         if leader_commit > commit_length:
             for i in range(commit_length, leader_commit):
                 # TODO: deliver log to application
-                pass
+                self.app.executing_log(log,i)
             stable_vars["commit_length"] = leader_commit
             stable_vars = self.stable_storage.storeAll(stable_vars)
     
@@ -536,10 +536,25 @@ class RaftNode:
             and last_log_term == election_term):
             for i in range(commit_length, latest_ack):
                 # TODO: DELIVER LOG TO APP
-                pass
+                self.app.executing_log(log,i)
         
             self.stable_storage.update("commit_length", latest_ack)
 
+    def __commitlogentries(self):
+        stable_vars = self.stable_storage.load()
+        min_acks = math.ceil((self.lst_vars.len() + 1) / 2)
+        while stable_vars["commit_length"] < len(stable_vars["log"]):
+            acks = 0
+            for id in self.lst_vars.ids():
+                if self.lst_vars.elmt(id)["acked_length"] >= stable_vars["commit_length"]:
+                    acks += 1
+                
+            if (acks >= min_acks):
+                self.app.executing_log(stable_vars['log'], stable_vars["commit_length"])
+                stable_vars["commit_length"] += 1
+                self.stable_storage.update("commit_length", stable_vars["commit_length"])
+            else:
+                break
 
     def append_log(self, json_request: str) -> str:
         request = self.msg_parser.deserialize(json_request)
@@ -613,6 +628,14 @@ class RaftNode:
         self.votes_received = 0
         stable_vars = self.stable_storage.load()
 
+        if (request['command'] == 'request_log'):
+            response = ExecuteResp({
+                "status": RespStatus.SUCCESS.value,
+                "address": self.address,
+                "log": stable_vars["log"],
+            })
+            return self.msg_parser.serialize(response)
+
         log = Log({
             "term": stable_vars["election_term"],
             "command": request["command"],
@@ -622,40 +645,40 @@ class RaftNode:
         stable_vars["log"].append(log)
         self.stable_storage.update("log", stable_vars["log"])
 
-        # TODO: EVENT MANAGEMENT
-        self.wait_for_votes = asyncio.Event()
+        # # TODO: EVENT MANAGEMENT
+        # self.wait_for_votes = asyncio.Event()
 
-        # for i in range(self.lst_vars.len()):
-        #     addr = self.lst_vars.cluster_addr_list(i)
-        for id in self.lst_vars.ids():
-            elmt = self.lst_vars.elmt(id)
-            addr = elmt["addr"]
+        # # for i in range(self.lst_vars.len()):
+        # #     addr = self.lst_vars.cluster_addr_list(i)
+        # for id in self.lst_vars.ids():
+        #     elmt = self.lst_vars.elmt(id)
+        #     addr = elmt["addr"]
 
-            if addr == self.address:
-                continue
-            asyncio.create_task(self.__send_append_log(addr, log))
+        #     if addr == self.address:
+        #         continue
+        #     asyncio.create_task(self.__send_append_log(addr, log))
 
-        async def wait_for_votes():
-            await self.wait_for_votes.wait()
+        # async def wait_for_votes():
+        #     await self.wait_for_votes.wait()
 
-        if self.lst_vars.len() > 1:
-            asyncio.get_event_loop().run_until_complete(wait_for_votes())
+        # if self.lst_vars.len() > 1:
+        #     asyncio.get_event_loop().run_until_complete(wait_for_votes())
 
 
-        # TODO: Execute Command
-        stable_vars["commit_length"] += 1
-        self.stable_storage.update("commit_length", stable_vars["commit_length"])
+        # # TODO: Execute Command
+        # stable_vars["commit_length"] += 1
+        # self.stable_storage.update("commit_length", stable_vars["commit_length"])
 
-        # for addr in self.cluster_addr_list:
-        # for i in range(self.lst_vars.len()):
-        #     addr = self.lst_vars.cluster_addr_list(i)
-        for id in self.lst_vars.ids():
-            elmt = self.lst_vars.elmt(id)
-            addr = elmt["addr"]
+        # # for addr in self.cluster_addr_list:
+        # # for i in range(self.lst_vars.len()):
+        # #     addr = self.lst_vars.cluster_addr_list(i)
+        # for id in self.lst_vars.ids():
+        #     elmt = self.lst_vars.elmt(id)
+        #     addr = elmt["addr"]
 
-            if addr == self.address:
-                continue
-            asyncio.create_task(self.__send_commit_log(addr, stable_vars["commit_length"]))            
+        #     if addr == self.address:
+        #         continue
+        #     asyncio.create_task(self.__send_commit_log(addr, stable_vars["commit_length"]))            
 
         response = ExecuteResp({
             "status": RespStatus.SUCCESS.value,
