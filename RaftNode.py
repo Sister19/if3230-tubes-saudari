@@ -28,6 +28,7 @@ import json
 import math
 import random
 from utils.SetInterval import SetInterval
+from msgs.RequestLogMsg import RequestLogReq, RequestLogResp
 
 T = TypeVar('T', bound=TypedDict)
 
@@ -658,6 +659,21 @@ class RaftNode:
         print(self.membership_consensus_event)
         await self.membership_consensus_event.wait(RaftNode.RPC_TIMEOUT)
         print("wait for membership votes done")
+
+    def request_log(self, json_request: str):
+        if self.type != RaftNode.NodeType.LEADER:
+            return self.msg_parser.serialize(RequestLogResp({
+                "status": RespStatus.REDIRECTED.value,
+                "address": self.cluster_leader_addr,
+            }))
+        
+        stable_vars = self.stable_storage.load()
+        
+        return self.msg_parser.serialize(RequestLogResp({
+            "status": RespStatus.SUCCESS.value,
+            "address": self.address,
+            "log": stable_vars["log"],
+        }))
 
     # Client RPCs
     def apply_membership(self, json_request: str) -> str: #FIXME: apply membership pake consensus, dan blocking 1 persatu

@@ -7,7 +7,7 @@ import 'react-toastify/dist/ReactToastify.css';
 function App() {
   const [nodeStatus, setNodeStatus] = useState<INodeStatus[]>([])
   const [ip, setIp] = useState<string>('localhost');
-  const [port, setPort] = useState<number>(5000);
+  const [port, setPort] = useState<number>(5002);
   const [continous, setContinous] = useState<boolean>(false);
 
   const fetchNodeStatus = async () => {
