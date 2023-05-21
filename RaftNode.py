@@ -1,6 +1,5 @@
 from threading import Thread, Timer, Event
 import threading
-from xmlrpc.client import ServerProxy
 from typing import Any, List, Set, Dict
 from enum import Enum
 from Address import Address
@@ -20,7 +19,7 @@ from msgs.GetStatusMsg import GetStatusReq, GetStatusResp
 from msgs.GetClusterMsg import GetClusterReq, GetClusterResp
 from msgs.UpdateAddrMsg import UpdateAddrReq, UpdateAddrResp
 from msgs.CommitUpdateAddrMsg import CommitUpdateAddrReq, CommitUpdateAddrResp
-from typing import TypedDict, TypeVar, Generic
+from typing import TypedDict
 from msgs.ErrorMsg import ErrorResp
 from utils.RPCHandler import RPCHandler
 import json
@@ -29,47 +28,8 @@ import random
 from utils.SetInterval import SetInterval
 from msgs.RequestLogMsg import RequestLogReq, RequestLogResp
 from concurrent.futures import ThreadPoolExecutor
+from StableStorage import StableStorage
 
-T = TypeVar('T', bound=TypedDict)
-
-class StableStorage(Generic[T]):
-    def __init__(self, addr: Address):
-        self.id = self.__id_from_addr(addr)
-        self.path = f"persistence/{self.id}.json"
-
-    def __id_from_addr(self, addr: Address):
-        return f"{addr.ip}_{addr.port}"
-
-    def __store(self, data: str):
-        with open(self.path, 'w') as f:
-            f.write(data)
-    
-    def __load(self):
-        with open(self.path, 'r') as f:
-            return f.read()
-    
-    def load(self) -> T:
-        return json.loads(self.__load())
-    
-    def update(self, key: str, value: Any) -> T:
-        data = self.load()
-        data[key] = value
-        str_data = json.dumps(data)
-        self.__store(str_data)
-
-        return data
-    
-    def storeAll(self, data: T) -> T:
-        str_data = json.dumps(data)
-        self.__store(str_data)
-
-        return data
-    
-    def try_load(self):
-        try:
-            return self.load()
-        except:
-            return None
 class RaftNode:
     # FIXME: knp di dalem class? mending taro luar biar bisa dipake
     HEARTBEAT_INTERVAL = 2
@@ -265,24 +225,27 @@ class RaftNode:
     def __req_vote(self):
         self.loop_timer.finished.set()
         self.__print_log("Request votes")
-        stable_vars = self.stable_storage.load()
-
-        stable_vars = self.stable_storage.update('election_term', stable_vars['election_term'] + 1)
-        stable_vars = self.stable_storage.update('voted_for', self.address)
         self.type = RaftNode.NodeType.CANDIDATE
         self.votes_received = set[Address]()
         self.votes_received.add(str(self.address))
-        
-        last_term = 0
-        if len(stable_vars["log"]) > 0:
-            last_term = stable_vars["log"][-1]["term"]
 
-        msg = VoteReq({
-            'voted_for': stable_vars["voted_for"], 
-            'term': stable_vars["election_term"],
-            'log_length': len(stable_vars["log"]),
-            'last_term': last_term, 
-        })
+        with self.stable_storage as stable_vars:
+            stable_vars.update({
+                'election_term': stable_vars['election_term'] + 1,
+                'voted_for': self.address,
+            })
+            self.stable_storage.storeAll(stable_vars)
+        
+            last_term = 0
+            if len(stable_vars["log"]) > 0:
+                last_term = stable_vars["log"][-1]["term"]
+
+            msg = VoteReq({
+                'voted_for': stable_vars["voted_for"], 
+                'term': stable_vars["election_term"],
+                'log_length': len(stable_vars["log"]),
+                'last_term': last_term, 
+            })
 
         for id in self.lst_vars.ids():
             self.__print_log(f"Sending request vote to {id}")
@@ -306,21 +269,22 @@ class RaftNode:
         voter_term = response["current_term"]
         granted = response["granted"]
 
-        stable_vars = self.stable_storage.load()
+        with self.stable_storage as stable_vars:
+            if self.type == RaftNode.NodeType.CANDIDATE and stable_vars["election_term"] == voter_term and granted:
+                self.votes_received.add(str(voter_id))
+                if len(self.votes_received) >= (self.lst_vars.len() + 1) / 2:
+                    self.__initialize_as_leader()
+                    self.__interrupt_and_restart_loop()
+                    # TODO: replicate log for all cluster nodes
+            elif voter_term > stable_vars["election_term"]:
+                stable_vars.update({
+                    "election_term": voter_term,
+                    "voted_for": None,
+                })
+                self.stable_storage.storeAll(stable_vars)
 
-        if self.type == RaftNode.NodeType.CANDIDATE and stable_vars["election_term"] == voter_term and granted:
-            self.votes_received.add(str(voter_id))
-            if len(self.votes_received) >= (self.lst_vars.len() + 1) / 2:
-                self.__initialize_as_leader()
-                self.__interrupt_and_restart_loop()
-                # TODO: replicate log for all cluster nodes
-        elif voter_term > stable_vars["election_term"]:
-            stable_vars["election_term"] = voter_term
-            stable_vars["voted_for"] = None
-            self.stable_storage.storeAll(stable_vars)
-
-            self.type = RaftNode.NodeType.FOLLOWER
-            self.__interrupt_and_restart_loop()        
+                self.type = RaftNode.NodeType.FOLLOWER
+                self.__interrupt_and_restart_loop()        
     
     def request_vote(self, json_request: str):
         request: VoteReq = self.msg_parser.deserialize(json_request)
@@ -331,34 +295,36 @@ class RaftNode:
         cLogLength = request["log_length"]
         cLogTerm = request["last_term"]
 
-        stable_vars = self.stable_storage.load()
-        
-        if cTerm > stable_vars["election_term"]:
-            stable_vars["election_term"] = cTerm
-            stable_vars["voted_for"] = None
-            self.stable_storage.storeAll(stable_vars)
+        with self.stable_storage as stable_vars:
+            if cTerm > stable_vars["election_term"]:
+                stable_vars.update({
+                    "election_term": cTerm,
+                    "voted_for": None,
+                })
+                self.stable_storage.storeAll(stable_vars)
 
-            self.type = RaftNode.NodeType.FOLLOWER
+                self.type = RaftNode.NodeType.FOLLOWER
         
-        last_term = 0
-        if len(stable_vars["log"]) > 0:
-            last_term = stable_vars["log"][-1]["term"]
-        
-        logOk = (cLogTerm > last_term) or (cLogTerm == last_term and cLogLength >= len(stable_vars["log"]))
+            last_term = 0
+            if len(stable_vars["log"]) > 0:
+                last_term = stable_vars["log"][-1]["term"]
+            
+            logOk = (cLogTerm > last_term) or (cLogTerm == last_term and cLogLength >= len(stable_vars["log"]))
 
-        response = VoteResp({
-            'status': "success",
-            'address': self.address,
-            'node_addr': self.address,
-            'current_term': stable_vars["election_term"],            
-        })
+            response = VoteResp({
+                'status': "success",
+                'address': self.address,
+                'node_addr': self.address,
+                'current_term': stable_vars["election_term"],            
+            })
 
-        if (cTerm == stable_vars["election_term"] and logOk 
-            and (stable_vars["voted_for"] is None or stable_vars["voted_for"] == cId)):
-            self.stable_storage.update('voted_for', cId)
-            response["granted"] = True
-        else:
-            response["granted"] = False
+            if (cTerm == stable_vars["election_term"] and logOk 
+                and (stable_vars["voted_for"] is None or stable_vars["voted_for"] == cId)):
+                stable_vars["voted_for"] = cId
+                self.stable_storage.storeAll(stable_vars)
+                response["granted"] = True
+            else:
+                response["granted"] = False
         
         self.__print_log(f"response vote: {response}")
         return self.msg_parser.serialize(response)
@@ -385,22 +351,21 @@ class RaftNode:
         if addr == self.address:
             return
 
-        stable_vars = self.stable_storage.load()
+        with self.stable_storage as stable_vars:
+            prefix_len = elmt["sent_length"]
+            suffix = stable_vars["log"][prefix_len:]
+            prefix_term = 0
+            if prefix_len > 0:
+                prefix_term = stable_vars["log"][prefix_len - 1]["term"]
 
-        prefix_len = elmt["sent_length"]
-        suffix = stable_vars["log"][prefix_len:]
-        prefix_term = 0
-        if prefix_len > 0:
-            prefix_term = stable_vars["log"][prefix_len - 1]["term"]
-
-        msg = HeartbeatReq({
-            "leader_addr": self.address,
-            "term": stable_vars["election_term"],
-            "prefix_len": prefix_len,
-            "prefix_term": prefix_term,
-            "suffix": suffix,
-            "commit_length": stable_vars["commit_length"],
-        })
+            msg = HeartbeatReq({
+                "leader_addr": self.address,
+                "term": stable_vars["election_term"],
+                "prefix_len": prefix_len,
+                "prefix_term": prefix_term,
+                "suffix": suffix,
+                "commit_length": stable_vars["commit_length"],
+            })
         
         resp: HeartbeatResp = self.rpc_handler.request(
             addr,
@@ -417,26 +382,27 @@ class RaftNode:
 
         acked_len = elmt["acked_length"]
 
-        stable_vars = self.stable_storage.load()
+        with self.stable_storage as stable_vars:
+            if resp_term == stable_vars["election_term"] and self.type == RaftNode.NodeType.LEADER:
+                if success_append and ack >= acked_len:
+                    elmt["sent_length"] = ack
+                    elmt["acked_length"] = ack
+                    self.lst_vars.store(id, elmt)
+                    self.__commit_log_entries(stable_vars)
+                elif elmt["sent_length"] > 0: #self.lst_vars.sent_length(follower_idx) > 0:
+                    elmt["sent_length"] = elmt["sent_length"] - 1
+                    self.lst_vars.store(id, elmt)
 
-        if resp_term == stable_vars["election_term"] and self.type == RaftNode.NodeType.LEADER:
-            if success_append and ack >= acked_len:
-                elmt["sent_length"] = ack
-                elmt["acked_length"] = ack
-                self.lst_vars.store(id, elmt)
-                self.__commit_log_entries()
-            elif elmt["sent_length"] > 0: #self.lst_vars.sent_length(follower_idx) > 0:
-                elmt["sent_length"] = elmt["sent_length"] - 1
-                self.lst_vars.store(id, elmt)
-
-                # TODO: REPLICATE LOG
-        elif resp_term > stable_vars["election_term"]:
-            stable_vars["election_term"] = resp_term
-            stable_vars["voted_for"] = None
-            self.stable_storage.storeAll(stable_vars)
-            self.type = RaftNode.NodeType.FOLLOWER
-            self.__interrupt_and_restart_loop()
-            return
+                    # TODO: REPLICATE LOG
+            elif resp_term > stable_vars["election_term"]:
+                stable_vars.update({
+                    "election_term": resp_term,
+                    "voted_for": None,
+                })
+                self.stable_storage.storeAll(stable_vars)
+                self.type = RaftNode.NodeType.FOLLOWER
+                self.__interrupt_and_restart_loop()
+                return
 
     # Gaperlu async
     def __try_to_apply_membership(self, contact_addr: Address):
@@ -454,7 +420,9 @@ class RaftNode:
             return
         
         self.__print_log(f"Response : {response}")
-        self.stable_storage.update("log", response["log"])
+        with self.stable_storage as stable_vars:
+            stable_vars["log"] = response["log"]
+            self.stable_storage.storeAll(stable_vars)
 
         self.lst_vars.set_addrs(response["cluster_addr_list"])
         self.cluster_leader_addr = response["address"]
@@ -463,7 +431,7 @@ class RaftNode:
     def heartbeat(self, json_request: str) -> str:
         # TODO : Implement heartbeat, reappend log baru dan check commitnya juga
         request: HeartbeatReq = self.msg_parser.deserialize(json_request)
-        self.__print_log(f"Request : {request}")
+        self.__print_log(f"Heartbeat - Request : {request}")
 
         leader_addr = request["leader_addr"]
         req_term = request["term"]
@@ -472,45 +440,45 @@ class RaftNode:
         leader_commit = request["commit_length"]
         suffix = request["suffix"]
 
-        stable_vars = self.stable_storage.load()
-
-        if req_term > stable_vars["election_term"]:
-            stable_vars["election_term"] = req_term
-            stable_vars["voted_for"] = None
-            stable_vars = self.stable_storage.storeAll(stable_vars)
+        with self.stable_storage as stable_vars:
+            if req_term > stable_vars["election_term"]:
+                stable_vars.update({
+                    "election_term": req_term,
+                    "voted_for": None,
+                })
+                self.stable_storage.storeAll(stable_vars)
+                
+                self.__interrupt_and_restart_loop()
             
-            self.__interrupt_and_restart_loop()
-        
-        if req_term == stable_vars["election_term"]:
-            self.type = RaftNode.NodeType.FOLLOWER
-            self.cluster_leader_addr = leader_addr
-        
-        log = stable_vars["log"]
-        log_ok = (
-            (len(log) >= prefix_len) and 
-            (prefix_len == 0 or log[prefix_len - 1]["term"] == prefix_term))
-        
-        response = HeartbeatResp({
-            'status': RespStatus.SUCCESS.value,
-            "heartbeat_response": "ack",
-            "address":            self.address,
-            "term": stable_vars["election_term"],
-        })
+            if req_term == stable_vars["election_term"]:
+                self.type = RaftNode.NodeType.FOLLOWER
+                self.cluster_leader_addr = leader_addr
+            
+            log = stable_vars["log"]
+            log_ok = (
+                (len(log) >= prefix_len) and 
+                (prefix_len == 0 or log[prefix_len - 1]["term"] == prefix_term))
+            
+            response = HeartbeatResp({
+                'status': RespStatus.SUCCESS.value,
+                "heartbeat_response": "ack",
+                "address":            self.address,
+                "term": stable_vars["election_term"],
+            })
 
-        if req_term == stable_vars["election_term"] and log_ok:
-            self.__append_entries(prefix_len, leader_commit, suffix)
-            ack = prefix_len + len(suffix)
-            response["ack"] = ack
-            response["success_append"] = True
-            self.__interrupt_and_restart_loop()
-        else:
-            response["ack"] = 0
-            response["success_append"] = False
+            if req_term == stable_vars["election_term"] and log_ok:
+                self.__append_entries(prefix_len, leader_commit, suffix, stable_vars)
+                ack = prefix_len + len(suffix)
+                response["ack"] = ack
+                response["success_append"] = True
+                self.__interrupt_and_restart_loop()
+            else:
+                response["ack"] = 0
+                response["success_append"] = False
 
         return self.msg_parser.serialize(response)
     
-    def __append_entries(self, prefix_len: int, leader_commit: int, suffix: List[Log]):
-        stable_vars = self.stable_storage.load()
+    def __append_entries(self, prefix_len: int, leader_commit: int, suffix: List[Log], stable_vars: StableVars):
         log = stable_vars["log"]
 
         if len(suffix) > 0 and len(log) > prefix_len:
@@ -523,7 +491,6 @@ class RaftNode:
                 log.append(suffix[i])
         
         stable_vars["log"] = log
-        stable_vars = self.stable_storage.storeAll(stable_vars)
 
         commit_length = stable_vars["commit_length"]
         if leader_commit > commit_length:
@@ -531,7 +498,8 @@ class RaftNode:
                 # TODO: deliver log to application
                 self.app.executing_log(log,i)
             stable_vars["commit_length"] = leader_commit
-            stable_vars = self.stable_storage.storeAll(stable_vars)
+
+        self.stable_storage.storeAll(stable_vars)
     
     def __calc_num_ack(self, idx: int):
         num_acked = 0
@@ -542,10 +510,8 @@ class RaftNode:
 
         return num_acked
 
-    def __commit_log_entries(self):
+    def __commit_log_entries(self, stable_vars: StableVars):
         min_acks = math.ceil((self.lst_vars.len() + 1) / 2)
-        stable_vars = self.stable_storage.load()
-
         log = stable_vars["log"]
         if (len(log) == 0):
             return
@@ -571,11 +537,12 @@ class RaftNode:
                 # TODO: DELIVER LOG TO APP
                 self.app.executing_log(log,i)
         
-            self.stable_storage.update("commit_length", latest_ack)
+            stable_vars["commit_length"] = latest_ack
+            self.stable_storage.storeAll(stable_vars)
 
     def update_address(self, json_request: str) -> str:
         request : UpdateAddrReq = self.msg_parser.deserialize(json_request)
-        self.__print_log(f"Request : {request}")
+        self.__print_log(f"Update Address - Request : {request}")
 
         self.temp_membership = {
             "ip": request["ip"],
@@ -625,9 +592,9 @@ class RaftNode:
             "is_committed": False
         })
 
-        stable_vars = self.stable_storage.load()
-        stable_vars["log"].append(log)
-        self.stable_storage.update("log", stable_vars["log"])
+        with self.stable_storage as stable_vars:
+            stable_vars["log"].append(log)
+            self.stable_storage.storeAll(stable_vars)
 
         response = AddLogResp({
             "status": RespStatus.SUCCESS.value,
@@ -639,13 +606,13 @@ class RaftNode:
     def commit_log(self, json_request: str) -> str:
         request = self.msg_parser.deserialize(json_request)
         
-        stable_vars = self.stable_storage.load()
-        for i in range(stable_vars["commit_length"], request["commit_length"]):
-            self.__print_log(f"Committing log {i}")
-            # Execute Command
+        with self.stable_storage as stable_vars:
+            for i in range(stable_vars["commit_length"], request["commit_length"]):
+                self.__print_log(f"Committing log {i}")
+                # Execute Command
 
-        stable_vars["commit_length"] = request["commit_length"]
-        self.stable_storage.update("commit_length", stable_vars["commit_length"])
+            stable_vars["commit_length"] = request["commit_length"]
+            self.stable_storage.storeAll(stable_vars)
 
         response = CommitLogResp({
             "status": RespStatus.SUCCESS.value,
@@ -667,13 +634,12 @@ class RaftNode:
                 "address": self.cluster_leader_addr,
             }))
         
-        stable_vars = self.stable_storage.load()
-        
-        return self.msg_parser.serialize(RequestLogResp({
-            "status": RespStatus.SUCCESS.value,
-            "address": self.address,
-            "log": stable_vars["log"],
-        }))
+        with self.stable_storage as stable_vars:
+            return self.msg_parser.serialize(RequestLogResp({
+                "status": RespStatus.SUCCESS.value,
+                "address": self.address,
+                "log": stable_vars["log"],
+            }))
 
     # Client RPCs
     def apply_membership(self, json_request: str) -> str: #FIXME: apply membership pake consensus, dan blocking 1 persatu
@@ -684,7 +650,7 @@ class RaftNode:
             }))
     
         request = self.msg_parser.deserialize(json_request)
-        self.__print_log(f"Request : {request}")
+        self.__print_log(f"Apply Membership - Request : {request}")
         
         # Asumsi : Leader tidak bisa dihapus
         if not request["insert"] and (request["ip"] == self.cluster_leader_addr.ip and request["port"] == self.cluster_leader_addr.port):
@@ -714,7 +680,8 @@ class RaftNode:
 
         if self.lst_vars.len() > 1:
             self.membership_consensus_event.wait(RaftNode.RPC_TIMEOUT)
-            if not self.membership_consensus_event.is_set():
+            self.membership_lock.release()
+            if not self.membership_consensus_event.
                 return self.msg_parser.serialize(ApplyMembershipResp({
                     "status": RespStatus.FAILED.value,
                     "reason": "Timeout",
@@ -732,18 +699,18 @@ class RaftNode:
             if str(update_addr) in self.lst_vars.ids():
                 self.lst_vars.remove_addr(update_addr)
 
-        stable_vars = self.stable_storage.load()
         self.__interrupt_and_restart_loop()
         self.membership_consensus_event.clear()
         self.membership_vote = 0
         
         self.membership_lock.release()
 
-        response = ApplyMembershipResp({
-            "status":            "success",
-            "log":               stable_vars["log"],
-            "cluster_addr_list": self.lst_vars.copy_addrs(),
-        })
+        with self.stable_storage as stable_vars:
+            response = ApplyMembershipResp({
+                "status":            "success",
+                "log":               stable_vars["log"],
+                "cluster_addr_list": self.lst_vars.copy_addrs(),
+            })
         return self.msg_parser.serialize(response)
 
     def __send_update_address(self, addr: Address, update_addr: Address, insert: bool):
@@ -782,23 +749,23 @@ class RaftNode:
                 }))
 
             request: ExecuteReq = self.msg_parser.deserialize(json_request)
-            stable_vars = self.stable_storage.load()
-            log = Log({
-                "term": stable_vars["election_term"],
-                "command": request["command"],
-                "value": request["value"],
-            })
+            with self.stable_storage as stable_vars:
+                log = Log({
+                    "term": stable_vars["election_term"],
+                    "command": request["command"],
+                    "value": request["value"],
+                })
 
-            stable_vars["log"].append(log)
-            print("stable_vars", stable_vars)
-            stable_vars = self.stable_storage.update("log", stable_vars["log"])
-            print("stable_vars", stable_vars)
-            elmt = self.lst_vars.elmt_by_addr(self.address)
-            print("elmt", elmt)
-            elmt["acked_length"] = len(stable_vars["log"])
-            print(elmt)
-            self.lst_vars.store_by_addr(self.address, elmt)
-            print(self.lst_vars.elmt_by_addr(self.address))
+                stable_vars["log"].append(log)
+                print("stable_vars", stable_vars)
+                self.stable_storage.storeAll(stable_vars)
+                print("stable_vars", stable_vars)
+                elmt = self.lst_vars.elmt_by_addr(self.address)
+                print("elmt", elmt)
+                elmt["acked_length"] = len(stable_vars["log"])
+                print(elmt)
+                self.lst_vars.store_by_addr(self.address, elmt)
+                print(self.lst_vars.elmt_by_addr(self.address))
 
             response = ExecuteResp({
                 "status": RespStatus.ONPROCESS.value,
@@ -816,24 +783,24 @@ class RaftNode:
 
     def get_status(self, json_request: str) -> str:
         request = self.msg_parser.deserialize(json_request)
-        self.__print_log(f"Request : {request}")
+        self.__print_log(f"Get Status - Request : {request}")
 
-        stable_vars = self.stable_storage.load()
-        response = GetStatusResp({
-            "status":            RespStatus.SUCCESS.value,
-            "address": self.address,
-            "data": {
+        with self.stable_storage as stable_vars:
+            response = GetStatusResp({
+                "status":            RespStatus.SUCCESS.value,
                 "address": self.address,
-                "election_term":     stable_vars["election_term"],
-                "voted_for": stable_vars["voted_for"],
-                "log":               stable_vars["log"],
-                "commit_length":     stable_vars["commit_length"],
-                "type": self.type.value,
-                "cluster_leader_addr": self.cluster_leader_addr,
-                "votes_received": list(self.votes_received),
-                "cluster_elmts": self.lst_vars.copy_data(),
-            }
-        })
+                "data": {
+                    "address": self.address,
+                    "election_term":     stable_vars["election_term"],
+                    "voted_for": stable_vars["voted_for"],
+                    "log":               stable_vars["log"],
+                    "commit_length":     stable_vars["commit_length"],
+                    "type": self.type.value,
+                    "cluster_leader_addr": self.cluster_leader_addr,
+                    "votes_received": list(self.votes_received),
+                    "cluster_elmts": self.lst_vars.copy_data(),
+                }
+            })
 
         return self.msg_parser.serialize(response)
     
@@ -845,7 +812,7 @@ class RaftNode:
             }))
         
         request = self.msg_parser.deserialize(json_request)
-        self.__print_log(f"Request : {request}")
+        self.__print_log(f"Get Cluster - Request : {request}")
 
         cluster = [
             self.lst_vars.elmt(id)
