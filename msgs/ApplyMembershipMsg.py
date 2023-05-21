@@ -5,6 +5,7 @@ from typing import Any, List
 class ApplyMembershipReq(BaseReq):
     ip: str
     port: int
+    insert: bool
 
 
 class ApplyMembershipResp(BaseResp):

@@ -19,6 +19,8 @@ from msgs.CommitLogMsg import CommitLogReq, CommitLogResp
 from msgs.BaseMsg import BaseReq, BaseResp, RespStatus
 from msgs.GetStatusMsg import GetStatusReq, GetStatusResp
 from msgs.GetClusterMsg import GetClusterReq, GetClusterResp
+from msgs.UpdateAddrMsg import UpdateAddrReq, UpdateAddrResp
+from msgs.CommitUpdateAddrMsg import CommitUpdateAddrReq, CommitUpdateAddrResp
 from typing import TypedDict, TypeVar, Generic
 from msgs.ErrorMsg import ErrorResp
 from utils.RPCHandler import RPCHandler
@@ -69,10 +71,10 @@ class StableStorage(Generic[T]):
             return None
 class RaftNode:
     # FIXME: knp di dalem class? mending taro luar biar bisa dipake
-    HEARTBEAT_INTERVAL = 1
-    ELECTION_TIMEOUT_MIN = 2
-    ELECTION_TIMEOUT_MAX = 3
-    RPC_TIMEOUT = 0.5
+    HEARTBEAT_INTERVAL = 2
+    ELECTION_TIMEOUT_MIN = 4
+    ELECTION_TIMEOUT_MAX = 6
+    RPC_TIMEOUT = 1
 
     class NodeType(Enum):
         LEADER = 1
@@ -87,6 +89,8 @@ class RaftNode:
         COMMIT_LOG = "commit_log"
         GET_STATUS = "get_status"
         GET_STATUS_CLUSTER = "get_status_cluster"
+        UPDATE_ADDRESS = "update_address"
+        COMMIT_UPDATE_ADDRESS = "commit_update_address"
     
     class StableVars(TypedDict):
         election_term: int
@@ -112,6 +116,10 @@ class RaftNode:
             id = str(addr)
             new_elmt = RaftNode.ClusterElmt(addr=addr, sent_length=0, acked_length=0)
             self.map[id] = new_elmt
+
+        def remove_addr(self, addr: Address):
+            id = str(addr)
+            del self.map[id]
 
         def ids(self):
             return list(self.map.keys())
@@ -171,6 +179,9 @@ class RaftNode:
         # additional vars
         self.msg_parser: MsgParser = MsgParser()
         self.rpc_handler: RPCHandler = RPCHandler()
+        self.membership_vote = None
+        self.membership_consensus_event = None
+        self.temp_membership = None
 
         self.election_timeout = random.uniform(
             RaftNode.ELECTION_TIMEOUT_MIN, RaftNode.ELECTION_TIMEOUT_MAX)
@@ -358,6 +369,7 @@ class RaftNode:
 
     def __leader_heartbeat(self):
         if self.type == RaftNode.NodeType.LEADER:
+            print(self.lst_vars.ids())
             for id in self.lst_vars.ids():
                 asyncio.run(self.__send_heartbeat(id))
         self.__interrupt_and_restart_loop()
@@ -423,15 +435,22 @@ class RaftNode:
             return
 
     def __try_to_apply_membership(self, contact_addr: Address):
-        msg = ApplyMembershipReq(self.address)
+        msg = ApplyMembershipReq({
+            "ip": self.address.ip,
+            "port": self.address.port,
+            "insert": True,
+        })
         self.__print_log(f"Sending msg : {msg}")
         response: ApplyMembershipResp = self.rpc_handler.request(
             contact_addr, RaftNode.FuncRPC.APPLY_MEMBERSHIP.value, msg)
         
-        # TODO: handle failed response
+        if (response["status"] != "success"):
+            self.lst_vars.append_addr(self.address)
+            return
+        
         self.__print_log(f"Response : {response}")
         self.stable_storage.update("log", response["log"])
-        # self.cluster_addr_list = response["cluster_addr_list"]
+
         self.lst_vars.set_addrs(response["cluster_addr_list"])
         self.cluster_leader_addr = response["address"]
 
@@ -549,21 +568,52 @@ class RaftNode:
         
             self.stable_storage.update("commit_length", latest_ack)
 
-    def __commitlogentries(self):
-        stable_vars = self.stable_storage.load()
-        min_acks = math.ceil((self.lst_vars.len() + 1) / 2)
-        while stable_vars["commit_length"] < len(stable_vars["log"]):
-            acks = 0
-            for id in self.lst_vars.ids():
-                if self.lst_vars.elmt(id)["acked_length"] >= stable_vars["commit_length"]:
-                    acks += 1
-                
-            if (acks >= min_acks):
-                self.app.executing_log(stable_vars['log'], stable_vars["commit_length"])
-                stable_vars["commit_length"] += 1
-                self.stable_storage.update("commit_length", stable_vars["commit_length"])
-            else:
-                break
+    def update_address(self, json_request: str) -> str:
+        request : UpdateAddrReq = self.msg_parser.deserialize(json_request)
+        self.__print_log(f"Request : {request}")
+
+        self.temp_membership = {
+            "ip": request["ip"],
+            "port": request["port"],
+            "insert": request["insert"],
+        }
+
+        response = UpdateAddrResp({
+            "status": RespStatus.SUCCESS.value,
+            "address": self.address,
+        })
+
+        print("TEMP MEMBERSHIP", self.temp_membership)
+
+        return self.msg_parser.serialize(response)
+
+    def commit_update_address(self, json_request:str) -> str:
+        request: CommitUpdateAddrReq = self.msg_parser.deserialize(json_request)
+        
+        if self.temp_membership is None \
+            or self.temp_membership["ip"] != request["ip"] \
+            or self.temp_membership["port"] != request["port"] \
+            or self.temp_membership["insert"] != request["insert"]:
+            return self.msg_parser.serialize(CommitUpdateAddrResp({
+                "status": RespStatus.FAILED.value,
+                "address": self.address,
+            }))
+        addr = Address(request["ip"], request["port"])
+
+        if request['insert']:
+            if str(addr) not in self.lst_vars.ids():
+                self.lst_vars.append_addr(addr)
+        else:
+            if str(addr) in self.lst_vars.ids():
+                self.lst_vars.remove_addr(addr)
+
+        print(f"Membership : {self.lst_vars.ids()}")
+
+        return self.msg_parser.serialize(CommitUpdateAddrResp({
+            "status": RespStatus.SUCCESS.value,
+            "address": self.address,
+        }))
+
 
     def append_log(self, json_request: str) -> str:
         request = self.msg_parser.deserialize(json_request)
@@ -603,6 +653,12 @@ class RaftNode:
 
         return self.msg_parser.serialize(response)
 
+    async def __wait_for_membership_votes(self):
+        print("wait for membership votes")
+        print(self.membership_consensus_event)
+        await self.membership_consensus_event.wait(RaftNode.RPC_TIMEOUT)
+        print("wait for membership votes done")
+
     # Client RPCs
     def apply_membership(self, json_request: str) -> str: #FIXME: apply membership pake consensus, dan blocking 1 persatu
         if self.type != RaftNode.NodeType.LEADER:
@@ -610,21 +666,91 @@ class RaftNode:
                 "status": RespStatus.REDIRECTED.value,
                 "address": self.cluster_leader_addr,
             }))
-
-        # TODO : Implement apply_membership
+    
         request = self.msg_parser.deserialize(json_request)
         self.__print_log(f"Request : {request}")
-        # TODO: notify existing nodes
-        self.lst_vars.append_addr(Address(request["ip"], request["port"]))
+        
+        # Asumsi : Leader tidak bisa dihapus
+        if not request["insert"] and (request["ip"] == self.cluster_leader_addr.ip and request["port"] == self.cluster_leader_addr.port):
+            return self.msg_parser.serialize(ApplyMembershipResp({
+                "status": RespStatus.FAILED.value,
+                "reason": "Cannot remove leader",
+            }))
+        print("masuk sini")
+        print(self.membership_vote, self.membership_consensus_event)
+
+        if (not self.membership_vote is None) or (not self.membership_consensus_event is None):
+            return self.msg_parser.serialize(ApplyMembershipResp({
+                "status": RespStatus.FAILED.value,
+                "reason": "There is an ongoing membership change",
+            }))
+        
+        update_addr = Address(request["ip"], request['port'])
+        
+
+        self.membership_vote = 0
+        self.membership_consensus_event = asyncio.Event()
+
+
+        for addr in self.lst_vars.copy_addrs():
+            if addr != self.address:
+                asyncio.get_event_loop().create_task(self.__send_update_address(addr,update_addr, request["insert"]))
+
+        if self.lst_vars.len() > 1:
+            print("masuk sini 2")
+            asyncio.ensure_future(self.membership_consensus_event.wait())
+
+        print("CONSENSUS EVENT DONE")
+ 
+
+        for addr in self.lst_vars.copy_addrs():
+            if addr != self.address:
+                asyncio.get_event_loop().create_task(self.__send_commit_address(addr,update_addr, request["insert"]))
+
+        if request['insert']:
+            if str(update_addr) not in self.lst_vars.ids():
+                self.lst_vars.append_addr(update_addr)
+        else:
+            if str(update_addr) in self.lst_vars.ids():
+                self.lst_vars.remove_addr(update_addr)
 
         stable_vars = self.stable_storage.load()
+        self.__interrupt_and_restart_loop()
+        self.membership_consensus_event = None
+        self.membership_vote = None
 
         response = ApplyMembershipResp({
             "status":            "success",
-            "log":               stable_vars["log"], # FIXME: log terbaru apa semua? yang terbaru aja
+            "log":               stable_vars["log"],
             "cluster_addr_list": self.lst_vars.copy_addrs(),
         })
         return self.msg_parser.serialize(response)
+
+    async def __send_update_address(self, addr: Address, update_addr: Address, insert: bool):
+        request = UpdateAddrReq({
+            "ip": update_addr.ip,
+            "port": update_addr.port,
+            "insert": insert,
+        })
+        print("masuk sini", addr, update_addr, insert)
+        resp: UpdateAddrResp = self.rpc_handler.request(addr, RaftNode.FuncRPC.UPDATE_ADDRESS.value, request)
+        print("RESPONSE", resp)
+        if resp['status'] == RespStatus.SUCCESS.value:
+            self.membership_vote += 1
+            if self.membership_vote + 1 > self.lst_vars.len() // 2:
+                print("EVENT SET")
+                self.membership_consensus_event.set()
+
+    async def __send_commit_address(self, addr: Address, update_addr: Address, insert: bool):
+        request = CommitUpdateAddrReq({
+            "ip": update_addr.ip,
+            "port": update_addr.port,
+            "insert": insert,
+        })
+        resp: CommitUpdateAddrResp = self.rpc_handler.request(addr, RaftNode.FuncRPC.COMMIT_UPDATE_ADDRESS.value, request)
+        if resp['status'] == RespStatus.SUCCESS.value:
+            # just ignore or print something
+            pass
 
     def execute(self, json_request: str) -> str:
         try:
