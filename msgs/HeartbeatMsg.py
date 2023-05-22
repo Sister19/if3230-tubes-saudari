@@ -12,6 +12,7 @@ class HeartbeatReq(BaseReq):
     prefix_term: int
     commit_length: int
     suffix: List[Log]
+    cluster_addrs: List[Address]
 
 class HeartbeatResp(BaseResp):
     ack: int

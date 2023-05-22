@@ -11,7 +11,7 @@ class Address(dict):
         self.port = port
 
     def __str__(self):
-        return f"{self.ip}:{self.port}"
+        return str(self.__dict__)
 
     def __iter__(self):
         return iter((self.ip, self.port))

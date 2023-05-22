@@ -115,6 +115,17 @@ class RaftNode:
         def copy_data(self):
             return self.map.copy()
         
+        def sync_addrs(self, cluster_addrs: List[Address]):
+            # add new address
+            for addr in cluster_addrs:
+                if str(addr) not in self.map:
+                    self.append_addr(addr)
+            
+            # remove old address
+            for id in self.ids():
+                addr = self.elmt(id)["addr"]
+                if addr not in cluster_addrs:
+                    self.remove_addr(addr)
 
     address: Address
     app: Any
@@ -343,7 +354,7 @@ class RaftNode:
                 self.threadpool.submit(self.__send_heartbeat, id) # Async
         self.__interrupt_and_restart_loop()
 
-    def __send_heartbeat(self, id):
+    def __send_heartbeat(self, id: str):
         elmt = self.lst_vars.elmt(id)
         addr = elmt["addr"]
 
@@ -364,6 +375,7 @@ class RaftNode:
                 "prefix_term": prefix_term,
                 "suffix": suffix,
                 "commit_length": stable_vars["commit_length"],
+                "cluster_addrs": self.lst_vars.copy_addrs(),
             })
         
         resp: HeartbeatResp = self.rpc_handler.request(
@@ -438,6 +450,7 @@ class RaftNode:
         prefix_term = request["prefix_term"]
         leader_commit = request["commit_length"]
         suffix = request["suffix"]
+        cluster_addrs = request["cluster_addrs"]
 
         with self.stable_storage as stable_vars:
             if req_term > stable_vars["election_term"]:
@@ -466,6 +479,7 @@ class RaftNode:
             })
 
             if req_term == stable_vars["election_term"] and log_ok:
+                self.lst_vars.sync_addrs(cluster_addrs)
                 self.__append_entries(prefix_len, leader_commit, suffix, stable_vars)
                 ack = prefix_len + len(suffix)
                 response["ack"] = ack
