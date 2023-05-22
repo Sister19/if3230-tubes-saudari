@@ -102,7 +102,6 @@ class RaftNode:
         
         def store_by_addr(self, addr: Address, elmt: "RaftNode.ClusterElmt"):
             id = str(addr)
-            print(f"store_by_addr: {id}")
             return self.store(id, elmt)
 
         def copy_addrs(self):
@@ -185,9 +184,6 @@ class RaftNode:
                 RaftNode.ELECTION_TIMEOUT_MIN, RaftNode.ELECTION_TIMEOUT_MAX)
             self.loop_timer = Timer(election_timeout, self.__callback_election_interval)
         self.loop_timer.start()
-        print()
-        print(self.lst_vars.ids())
-        print()
 
     def __interrupt_task(self):
         self.interrupt_event.wait()
@@ -349,7 +345,10 @@ class RaftNode:
         
 
     def __print_log(self, text: str):
-        print(f"[{self.address}] [{time.strftime('%H:%M:%S')}] [{self.type}] {text}")
+        addr = self.address["ip"] + ":" + str(self.address["port"])
+        stable_vars = self.stable_storage.load()
+        term = stable_vars["election_term"]
+        print(f"[{addr}] [{time.strftime('%H:%M:%S')}] [{self.type}:{term}] {text}")
 
     def __initialize_as_leader(self):
         self.__print_log("Initialize as leader node...")
@@ -358,6 +357,7 @@ class RaftNode:
 
     def __leader_heartbeat(self):
         if self.type == RaftNode.NodeType.LEADER:
+            self.__print_log("Sending heartbeat...")
             for id in self.lst_vars.ids():
                 self.threadpool.submit(self.__send_heartbeat, id) # Async
         self.__interrupt_and_restart_loop()
@@ -451,7 +451,7 @@ class RaftNode:
     def heartbeat(self, json_request: str) -> str:
         # TODO : Implement heartbeat, reappend log baru dan check commitnya juga
         request: HeartbeatReq = self.msg_parser.deserialize(json_request)
-        self.__print_log(f"Heartbeat - Request : {request}")
+        self.__print_log(f"Heartbeat: {request}")
 
         leader_addr = request["leader_addr"]
         req_term = request["term"]
@@ -712,7 +712,7 @@ class RaftNode:
             for future in as_completed(futures):
                 try:
                     response = future.result()
-                    print("RESPONSE : ", response, time.time() - start_time)
+                    self.__print_log("RESPONSE : ", response, time.time() - start_time)
                     start_time = time.time()
                     membership_vote += 1
                     if (membership_vote + 1 > self.lst_vars.len() // 2):
@@ -750,7 +750,6 @@ class RaftNode:
             "port": update_addr.port,
             "insert": insert,
         })
-        print("masuk sini", addr, update_addr, insert)
         resp: UpdateAddrResp = self.rpc_handler.request(addr, RaftNode.FuncRPC.UPDATE_ADDRESS.value, request)
         if resp['status'] != "success":
             return 0
@@ -784,15 +783,10 @@ class RaftNode:
                 })
 
                 stable_vars["log"].append(log)
-                print("stable_vars", stable_vars)
                 self.stable_storage.storeAll(stable_vars)
-                print("stable_vars", stable_vars)
                 elmt = self.lst_vars.elmt_by_addr(self.address)
-                print("elmt", elmt)
                 elmt["acked_length"] = len(stable_vars["log"])
-                print(elmt)
                 self.lst_vars.store_by_addr(self.address, elmt)
-                print(self.lst_vars.elmt_by_addr(self.address))
 
             response = ExecuteResp({
                 "status": RespStatus.ONPROCESS.value,

@@ -4,8 +4,8 @@ from Address import Address
 from msgs.ExecuteMsg import ExecuteReq, ExecuteResp
 
 def main():
-    if (len(sys.argv) < 5):
-        print("one_cmd_client.py <server ip> <server port> <type> <command>")
+    if (len(sys.argv) < 4):
+        print("one_cmd_client.py <server ip> <server port> <type> [command]")
         return
 
     rpc_handler = RPCHandler()
@@ -18,6 +18,10 @@ def main():
     type = sys.argv[3]
 
     if (type == "execute"):
+        if (len(sys.argv) < 5):
+            print("one_cmd_client.py <server ip> <server port> execute <command>")
+            return
+
         command = sys.argv[4]
         req = ExecuteReq({
             "command": command,
@@ -27,10 +31,9 @@ def main():
         resp: ExecuteResp = rpc_handler.request(server_addr, "execute", req)
         print(resp)
     
-    elif (type == "request_log"):
-        resp: ExecuteResp = rpc_handler.request(server_addr, "request_log", {})
+    else:
+        resp: ExecuteResp = rpc_handler.request(server_addr, type, {})
         print(resp)
-
 
 if __name__ == "__main__":
     main()
