@@ -213,6 +213,11 @@ class RaftNode:
         loaded = self.stable_storage.try_load()
         if loaded is not None:
             self.__print_log(f"Loaded stable storage: {loaded}")
+            # TODO: rerun app
+            log = loaded["log"]
+            for entry in log:
+                self.app.executing_log(entry)
+
             return
 
         self.__init_stable()
