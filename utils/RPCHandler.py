@@ -11,13 +11,24 @@ class RPCHandler:
         self.msg_parser = MsgParser()
 
     def __call(self, addr: Address, rpc_name: str, msg: BaseMsg):
-        node = ServerProxy(f"http://{addr.ip}:{addr.port}")
-        json_request = self.msg_parser.serialize(msg)
-        print(f"Sending request to {addr.ip}:{addr.port}...")
-        rpc_function = getattr(node, rpc_name)
-
+       
         try:
+            node = ServerProxy(f"http://{addr.ip}:{addr.port}")
+            if isinstance(node, ConnectionRefusedError):
+                raise Exception(f"Node {addr.ip}:{addr.port} can't be reached")
+            json_request = self.msg_parser.serialize(msg)
+            print(f"Sending request to {addr.ip}:{addr.port}...")
+            rpc_function = getattr(node, rpc_name)
+
             response = rpc_function(json_request)
+
+            if isinstance(response, ConnectionRefusedError):
+                raise Exception(f"Node {addr.ip}:{addr.port} can't be reached")
+            elif isinstance(response, TimeoutError):
+                raise Exception(f"Node {addr.ip}:{addr.port} timeout")
+            elif isinstance(response, TypeError):
+                raise Exception(f"Node {addr.ip}:{addr.port} return invalid response")
+            
             print(f"Response from {addr.ip}:{addr.port}: {response}")
             return response
         except Exception as e:

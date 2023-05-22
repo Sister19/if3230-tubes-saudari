@@ -523,38 +523,12 @@ class RaftNode:
             stable_vars["commit_length"] = leader_commit
 
         self.stable_storage.storeAll(stable_vars)
-    
-    # def __calc_num_ack(self, idx: int):
-    #     num_acked = 0
-    #     for id in self.lst_vars.ids():
-    #         elmt = self.lst_vars.elmt(id)
-    #         if elmt["acked_length"] >= (idx+1):
-    #             num_acked += 1
-
-    #     return num_acked
 
     def __commit_log_entries(self, stable_vars: StableVars):
         min_acks = math.ceil((self.lst_vars.len() + 1) / 2)
         log = stable_vars["log"]
         if (len(log) == 0):
             return
-
-        # acked_above_threshold = [
-        #     self.__calc_num_ack(x) >= min_acks
-        #     for x in range(len(log))
-        # ]
-        # # latest_ack = -1
-        # # # iterate in reverse order
-        # # for i in range(len(log) - 1, -1, -1):
-        # #     if acked_above_threshold[i]:
-        # #         latest_ack = i
-        # #         break
-
-        # latest_ack = 0
-        # for i in range(len(log)):
-        #     latest_ack = i
-        #     if not acked_above_threshold[i]:
-        #         break
         
         latest_ack = 0
         for i in range(len(log)):
@@ -693,55 +667,54 @@ class RaftNode:
                 "status": RespStatus.FAILED.value,
                 "reason": "Cannot remove leader",
             }))
+        try:    
+            if not self.membership_lock.acquire(blocking=False):
+                return self.msg_parser.serialize(ApplyMembershipResp({
+                    "status": RespStatus.FAILED.value,
+                    "reason": "There is an ongoing membership change",
+                }))
+            
+            update_addr = Address(request["ip"], request['port'])
+            
+            send_addrs = [addr for addr in self.lst_vars.copy_addrs() if addr != self.address]
 
-        if not self.membership_lock.acquire(blocking=False):
-            return self.msg_parser.serialize(ApplyMembershipResp({
-                "status": RespStatus.FAILED.value,
-                "reason": "There is an ongoing membership change",
-            }))
-        
-        update_addr = Address(request["ip"], request['port'])
-        
-        send_addrs = [addr for addr in self.lst_vars.copy_addrs() if addr != self.address]
+            futures = [self.threadpool.submit(self.__send_update_address, send_addr, update_addr, request["insert"]) for send_addr in send_addrs]
 
-        futures = [self.threadpool.submit(self.__send_update_address, send_addr, update_addr, request["insert"]) for send_addr in send_addrs]
-
-        membership_vote = 0
-        if self.lst_vars.len() > 1:
-            start_time = time.time()
-            for future in as_completed(futures):
-                try:
-                    response = future.result()
-                    self.__print_log("RESPONSE : ", response, time.time() - start_time)
-                    start_time = time.time()
-                    membership_vote += 1
-                    if (membership_vote + 1 > self.lst_vars.len() // 2):
-                        break
-                except TimeoutError:
-                    pass           
+            membership_vote = 0
+            if self.lst_vars.len() > 1:
+                for future in as_completed(futures):
+                    try:
+                        response = future.result()
+                        membership_vote += 1
+                        if (membership_vote + 1 > self.lst_vars.len() // 2):
+                            break
+                    except TimeoutError:
+                        pass           
 
 
-        for addr in self.lst_vars.copy_addrs():
-            if addr != self.address:
-                self.threadpool.submit(self.__send_commit_address, addr, update_addr, request["insert"])
+            for addr in self.lst_vars.copy_addrs():
+                if addr != self.address:
+                    self.threadpool.submit(self.__send_commit_address, addr, update_addr, request["insert"])
 
-        if request['insert']:
-            if str(update_addr) not in self.lst_vars.ids():
-                self.lst_vars.append_addr(update_addr)
-        else:
-            if str(update_addr) in self.lst_vars.ids():
-                self.lst_vars.remove_addr(update_addr)
+            if request['insert']:
+                if str(update_addr) not in self.lst_vars.ids():
+                    self.lst_vars.append_addr(update_addr)
+            else:
+                if str(update_addr) in self.lst_vars.ids():
+                    self.lst_vars.remove_addr(update_addr)
 
-        self.__interrupt_and_restart_loop()
-        
-        self.membership_lock.release()
+            self.__interrupt_and_restart_loop()
 
-        with self.stable_storage as stable_vars:
-            response = ApplyMembershipResp({
-                "status":            "success",
-                "log":               stable_vars["log"],
-                "cluster_addr_list": self.lst_vars.copy_addrs(),
-            })
+            with self.stable_storage as stable_vars:
+                response = ApplyMembershipResp({
+                    "status":            "success",
+                    "log":               stable_vars["log"],
+                    "cluster_addr_list": self.lst_vars.copy_addrs(),
+                })
+        finally:
+            if self.membership_lock.locked():
+                self.membership_lock.release()
+
         return self.msg_parser.serialize(response)
 
     def __send_update_address(self, addr: Address, update_addr: Address, insert: bool):
