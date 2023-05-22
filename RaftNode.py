@@ -69,22 +69,18 @@ class RaftNode:
 
     class LstVars:
         map: Dict[str, "RaftNode.ClusterElmt"]
-        addresses: List[Address]
 
         def __init__(self):
             self.map = {}
-            self.addresses = []
 
         def append_addr(self, addr: Address):
             id = str(addr)
             new_elmt = RaftNode.ClusterElmt(addr=addr, sent_length=0, acked_length=0)
             self.map[id] = new_elmt
-            self.addresses.append(addr)
 
         def remove_addr(self, addr: Address):
             id = str(addr)
             del self.map[id]
-            self.addresses.remove(addr)
 
         def ids(self):
             return list(self.map.keys())
@@ -119,8 +115,6 @@ class RaftNode:
         def copy_data(self):
             return self.map.copy()
         
-        def set_addresses(self, addrs: List[Address]):
-            self.addresses = addrs
 
     address: Address
     app: Any
@@ -345,8 +339,8 @@ class RaftNode:
 
     def __leader_heartbeat(self):
         if self.type == RaftNode.NodeType.LEADER:
-            for address in self.lst_vars.addresses:
-                self.threadpool.submit(self.__send_heartbeat, str(address))
+            for id in self.lst_vars.ids():
+                self.threadpool.submit(self.__send_heartbeat, id) # Async
         self.__interrupt_and_restart_loop()
 
     def __send_heartbeat(self, id):
@@ -370,7 +364,6 @@ class RaftNode:
                 "prefix_term": prefix_term,
                 "suffix": suffix,
                 "commit_length": stable_vars["commit_length"],
-                "cluster": self.lst_vars.copy_addrs(),
             })
         
         resp: HeartbeatResp = self.rpc_handler.request(
@@ -445,10 +438,8 @@ class RaftNode:
         prefix_term = request["prefix_term"]
         leader_commit = request["commit_length"]
         suffix = request["suffix"]
-        cluster = request["cluster"]
 
         with self.stable_storage as stable_vars:
-            self.lst_vars.set_addresses(cluster)
             if req_term > stable_vars["election_term"]:
                 stable_vars.update({
                     "election_term": req_term,
