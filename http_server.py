@@ -13,7 +13,7 @@ app = Flask(__name__)
 CORS(app)
 
 def req_status_node(addr: Address):
-    rpc_handler = RPCHandler()
+    rpc_handler = RPCHandler("http_server.py")
     resp: GetStatusResp = rpc_handler.request(addr, "get_status", {})
     return resp
 
@@ -22,7 +22,7 @@ async def async_req_status_node(addr: Address):
 
 async def get_statuses(ip: str, port: int):
     addr = Address(ip, port)
-    rpc_handler = RPCHandler()
+    rpc_handler = RPCHandler("http_server.py")
     resp: GetClusterResp = rpc_handler.request(addr, "get_cluster", {})
     cluster_elmts = resp["data"]
 

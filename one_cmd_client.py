@@ -8,7 +8,7 @@ def main():
         print("one_cmd_client.py <server ip> <server port> <type> [command]")
         return
 
-    rpc_handler = RPCHandler()
+    rpc_handler = RPCHandler("one_cmd_client.py")
 
     ip = sys.argv[1]
     port = int(sys.argv[2])

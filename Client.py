@@ -11,7 +11,7 @@ if __name__ == "__main__":
     if len(sys.argv) < 3:
         print("client.py <server ip> <server port>")
 
-    rpc_handler = RPCHandler()
+    rpc_handler = RPCHandler(f"client.py")
     server_addr = Address(sys.argv[1], int(sys.argv[2]))
     while True:
         inp = input("Enter command: ").split()

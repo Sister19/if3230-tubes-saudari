@@ -151,7 +151,7 @@ class RaftNode:
 
         # additional vars
         self.msg_parser: MsgParser = MsgParser()
-        self.rpc_handler: RPCHandler = RPCHandler()
+        self.rpc_handler: RPCHandler = RPCHandler(f"{addr.ip}:{addr.port}")
         self.membership_lock = threading.Lock()
         self.temp_membership = None
         self.threadpool : ThreadPoolExecutor = ThreadPoolExecutor()

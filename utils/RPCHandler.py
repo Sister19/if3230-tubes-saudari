@@ -7,8 +7,12 @@ from xmlrpc.client import ServerProxy
 
 
 class RPCHandler:
-    def __init__(self):
+    def __init__(self, id: str | None = None):
         self.msg_parser = MsgParser()
+        self.id = id
+
+    def __print_log(self, msg: str):
+        print(f"[RPCHandler-{self.id}] {msg}")
 
     def __call(self, addr: Address, rpc_name: str, msg: BaseMsg):
        
@@ -17,7 +21,7 @@ class RPCHandler:
             if isinstance(node, ConnectionRefusedError):
                 raise Exception(f"Node {addr.ip}:{addr.port} can't be reached")
             json_request = self.msg_parser.serialize(msg)
-            print(f"Sending request to {addr.ip}:{addr.port}...")
+            self.__print_log(f"Sending request to {addr.ip}:{addr.port}...")
             rpc_function = getattr(node, rpc_name)
 
             response = rpc_function(json_request)
@@ -29,10 +33,10 @@ class RPCHandler:
             elif isinstance(response, TypeError):
                 raise Exception(f"Node {addr.ip}:{addr.port} return invalid response")
             
-            print(f"Response from {addr.ip}:{addr.port}: {response}")
+            self.__print_log(f"Response from {addr.ip}:{addr.port}: {response}")
             return response
         except Exception as e:
-            print(f"Error while sending request to {addr.ip}:{addr.port}: {e}")
+            self.__print_log(f"Error while sending request to {addr.ip}:{addr.port}: {e}")
             # print(e.with_traceback(True))
             return json.dumps(ErrorResp({
                 'status': RespStatus.FAILED.value,
@@ -56,7 +60,7 @@ class RPCHandler:
         
         # TODO: handle fail response
         if response["status"] == RespStatus.FAILED.value:
-            print("Failed to send request")
+            self.__print_log("Failed to send request")
             # exit(1)
             # raise Exception(response["error"])
 
