@@ -36,7 +36,7 @@ class RaftNode:
     # FIXME: knp di dalem class? mending taro luar biar bisa dipake
     HEARTBEAT_INTERVAL = 4
     ELECTION_TIMEOUT_MIN = 15
-    ELECTION_TIMEOUT_MAX = 30
+    ELECTION_TIMEOUT_MAX = 25
     RPC_TIMEOUT = 12
 
     class NodeType(Enum):
