@@ -30,12 +30,13 @@ from msgs.RequestLogMsg import RequestLogReq, RequestLogResp
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from StableStorage import StableStorage
 from app import MessageQueue
+import os
 
 class RaftNode:
     # FIXME: knp di dalem class? mending taro luar biar bisa dipake
     HEARTBEAT_INTERVAL = 4
-    ELECTION_TIMEOUT_MIN = 8
-    ELECTION_TIMEOUT_MAX = 12
+    ELECTION_TIMEOUT_MIN = 15
+    ELECTION_TIMEOUT_MAX = 30
     RPC_TIMEOUT = 12
 
     class NodeType(Enum):
@@ -235,7 +236,7 @@ class RaftNode:
 
 
     def __req_vote(self):
-        self.loop_timer.finished.set()
+        # self.loop_timer.finished.set()
         self.__print_log("Request votes")
         self.type = RaftNode.NodeType.CANDIDATE
         self.votes_received = set[Address]()
@@ -357,7 +358,8 @@ class RaftNode:
 
     def __leader_heartbeat(self):
         if self.type == RaftNode.NodeType.LEADER:
-            self.__print_log("Sending heartbeat...")
+            addrs = "".join(self.lst_vars.ids())
+            self.__print_log(f"Sending heartbeat... {addrs}")
             for id in self.lst_vars.ids():
                 self.threadpool.submit(self.__send_heartbeat, id) # Async
         self.__interrupt_and_restart_loop()

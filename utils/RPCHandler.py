@@ -37,6 +37,7 @@ class RPCHandler:
             return response
         except Exception as e:
             self.__print_log(f"Error while sending request to {addr.ip}:{addr.port}: {e}")
+            self.__print_log(f"Failed Request: {str(msg)}")
             # print(e.with_traceback(True))
             return json.dumps(ErrorResp({
                 'status': RespStatus.FAILED.value,
