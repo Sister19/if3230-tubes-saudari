@@ -1,4 +1,4 @@
-from typing import TypedDict, List, Set, Dict
+from typing import TypedDict, List, Set, Dict, Any
 from Address import Address
 from structs.Log import Log
 
@@ -17,3 +17,4 @@ class NodeStatus(TypedDict):
   cluster_leader_addr: Address
   votes_received: List[Address]
   cluster_elmts: Dict[str, ClusterElmt]
+  app_data: Any

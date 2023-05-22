@@ -2,6 +2,8 @@ from structs.Log import Log
 import re
 
 class MessageQueue:
+    ALLOWED_COMMANDS = ["enqueue", "dequeue"]
+
     def __init__(self):
         self.queue = []
 
@@ -13,14 +15,24 @@ class MessageQueue:
             return None
         return self.queue.pop(0)
     
-    def executing_log(self, log: Log, i: int):
+    def executing_log(self, log: Log):
         # get the value inside the command queue
-        raw_command = log[i]['command']
-        command_queue = re.search(r'\bqueue\((.*?)\)', raw_command)
+        raw_command = log['command']
 
-        if (command_queue != None and command_queue.group(1)):
-            self.__enqueue(command_queue.group(1))
+        splitted = raw_command.split('(')
+        command = splitted[0]
+        value = splitted[1][:-1]
 
-        elif (raw_command == "dequeue()"):
-            result = self.__dequeue()
-            log[i]['value'] = result
+        if command not in self.ALLOWED_COMMANDS:
+            log['value'] = "Invalid command"
+            return
+        
+        if command == "enqueue":
+            log['value'] = self.__enqueue(value)
+        elif command == "dequeue":
+            log['value'] = self.__dequeue()
+        else:
+            log['value'] = "Not implemented yet"
+
+    def data(self):
+        return self.queue

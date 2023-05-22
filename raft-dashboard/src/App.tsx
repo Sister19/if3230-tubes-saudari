@@ -9,6 +9,7 @@ function App() {
   const [ip, setIp] = useState<string>('localhost');
   const [port, setPort] = useState<number>(5002);
   const [continous, setContinous] = useState<boolean>(false);
+  const [delay, setDelay] = useState<number>(1000);
 
   const fetchNodeStatus = async () => {
     try {
@@ -27,13 +28,13 @@ function App() {
     if (continous) {
       const interval = setInterval(() => {
         fetchNodeStatus()
-      }, 1000)
+      }, delay)
 
       return () => clearInterval(interval)
     } else {
       fetchNodeStatus()
     }
-  }, [continous, ip, port])
+  }, [continous, ip, port, delay])
 
   return (
     <div>
@@ -46,10 +47,14 @@ function App() {
           <label htmlFor="port">Port: </label>
           <input type="number" id="port" value={port} onChange={(e) => setPort(parseInt(e.target.value))} />
 
-          <label htmlFor="continous"></label>
+          <label htmlFor="delay">Delay</label>
+          <input type="number" id="delay" value={delay} onChange={(e) => setDelay(parseInt(e.target.value))} />
+
+          <label htmlFor="continous">Continous: </label>
           <input type="checkbox" id="continous" checked={continous} onChange={(e) => setContinous(
             e.target.checked
           )} />
+
         </div>
         <div>
           <button onClick={() => {
@@ -116,6 +121,13 @@ function App() {
                       </tbody>
                     </table>
                   </div>
+                </div>
+                <div>
+                  <p>
+                    App Data: {
+                      JSON.stringify(status.app_data)
+                    }
+                  </p>
                 </div>
                 <p>
                   Votes Received: {JSON.stringify(status.votes_received)}

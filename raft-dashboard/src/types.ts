@@ -27,4 +27,5 @@ export interface INodeStatus {
     cluster_elmts: {
         [key: string]: IClusterElmt
     }
+    app_data: unknown[]
 }

@@ -29,6 +29,7 @@ from utils.SetInterval import SetInterval
 from msgs.RequestLogMsg import RequestLogReq, RequestLogResp
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from StableStorage import StableStorage
+from app import MessageQueue
 
 class RaftNode:
     # FIXME: knp di dalem class? mending taro luar biar bisa dipake
@@ -38,9 +39,9 @@ class RaftNode:
     RPC_TIMEOUT = 12
 
     class NodeType(Enum):
-        LEADER = 1
-        CANDIDATE = 4
-        FOLLOWER = 5
+        LEADER = "LEADER"
+        CANDIDATE = "CANDIDATE"
+        FOLLOWER = "FOLLOWER"
 
     class FuncRPC(Enum):
         APPLY_MEMBERSHIP = "apply_membership"
@@ -138,10 +139,10 @@ class RaftNode:
     votes_received: Set[Address]
     loop_timer: Timer
 
-    def __init__(self, application: Any, addr: Address, contact_addr: Address = None):
+    def __init__(self, application: MessageQueue, addr: Address, contact_addr: Address = None):
         socket.setdefaulttimeout(RaftNode.RPC_TIMEOUT)
         self.address:             Address = addr
-        self.app:                 Any = application
+        self.app:                 MessageQueue = application
 
         # volatile vars
         self.__init_volatile()
@@ -294,6 +295,7 @@ class RaftNode:
                 self.stable_storage.storeAll(stable_vars)
 
                 self.type = RaftNode.NodeType.FOLLOWER
+                self.votes_received = set[Address]()
                 self.__interrupt_and_restart_loop()        
     
     def request_vote(self, json_request: str):
@@ -314,6 +316,7 @@ class RaftNode:
                 self.stable_storage.storeAll(stable_vars)
 
                 self.type = RaftNode.NodeType.FOLLOWER
+                self.votes_received = set[Address]()
         
             last_term = 0
             if len(stable_vars["log"]) > 0:
@@ -412,6 +415,7 @@ class RaftNode:
                 })
                 self.stable_storage.storeAll(stable_vars)
                 self.type = RaftNode.NodeType.FOLLOWER
+                self.votes_received = set[Address]()
                 self.__interrupt_and_restart_loop()
                 return
 
@@ -464,6 +468,7 @@ class RaftNode:
             
             if req_term == stable_vars["election_term"]:
                 self.type = RaftNode.NodeType.FOLLOWER
+                self.votes_received = set[Address]()
                 self.cluster_leader_addr = leader_addr
             
             log = stable_vars["log"]
@@ -509,19 +514,19 @@ class RaftNode:
         if leader_commit > commit_length:
             for i in range(commit_length, leader_commit):
                 # TODO: deliver log to application
-                self.app.executing_log(log,i)
+                self.app.executing_log(log[i])
             stable_vars["commit_length"] = leader_commit
 
         self.stable_storage.storeAll(stable_vars)
     
-    def __calc_num_ack(self, idx: int):
-        num_acked = 0
-        for id in self.lst_vars.ids():
-            elmt = self.lst_vars.elmt(id)
-            if elmt["acked_length"] >= idx:
-                num_acked += 1
+    # def __calc_num_ack(self, idx: int):
+    #     num_acked = 0
+    #     for id in self.lst_vars.ids():
+    #         elmt = self.lst_vars.elmt(id)
+    #         if elmt["acked_length"] >= (idx+1):
+    #             num_acked += 1
 
-        return num_acked
+    #     return num_acked
 
     def __commit_log_entries(self, stable_vars: StableVars):
         min_acks = math.ceil((self.lst_vars.len() + 1) / 2)
@@ -529,26 +534,43 @@ class RaftNode:
         if (len(log) == 0):
             return
 
-        acked_above_threshold = [
-            self.__calc_num_ack(x) >= min_acks
-            for x in range(len(log))
-        ]
-        latest_ack = -1
-        # iterate in reverse order
-        for i in range(len(log) - 1, -1, -1):
-            if acked_above_threshold[i]:
-                latest_ack = i
-                break
+        # acked_above_threshold = [
+        #     self.__calc_num_ack(x) >= min_acks
+        #     for x in range(len(log))
+        # ]
+        # # latest_ack = -1
+        # # # iterate in reverse order
+        # # for i in range(len(log) - 1, -1, -1):
+        # #     if acked_above_threshold[i]:
+        # #         latest_ack = i
+        # #         break
+
+        # latest_ack = 0
+        # for i in range(len(log)):
+        #     latest_ack = i
+        #     if not acked_above_threshold[i]:
+        #         break
         
+        latest_ack = 0
+        for i in range(len(log)):
+            sum_acks = 0
+            for id in self.lst_vars.ids():
+                elmt = self.lst_vars.elmt(id)
+                if i < elmt["acked_length"]:
+                    sum_acks += 1
+            
+            if sum_acks >= min_acks:
+                latest_ack = i+1
+
+
         commit_length = stable_vars["commit_length"]
-        last_log_term = log[latest_ack]["term"]
+        last_log_term = log[latest_ack-1]["term"]
         election_term = stable_vars["election_term"]
-        if (latest_ack != -1 
-            and latest_ack > commit_length
+        if (latest_ack > commit_length
             and last_log_term == election_term):
             for i in range(commit_length, latest_ack):
                 # TODO: DELIVER LOG TO APP
-                self.app.executing_log(log,i)
+                self.app.executing_log(log[i])
         
             stable_vars["commit_length"] = latest_ack
             self.stable_storage.storeAll(stable_vars)
@@ -799,6 +821,7 @@ class RaftNode:
                     "cluster_leader_addr": self.cluster_leader_addr,
                     "votes_received": list(self.votes_received),
                     "cluster_elmts": self.lst_vars.copy_data(),
+                    "app_data": self.app.data(),
                 }
             })
 
