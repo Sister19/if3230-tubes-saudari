@@ -767,7 +767,6 @@ class RaftNode:
             })
             return self.msg_parser.serialize(response)
         except Exception as e:
-            print(e)
             self.__print_log(str(e))
             return self.msg_parser.serialize(ExecuteResp({
                 "status": RespStatus.FAILED.value,

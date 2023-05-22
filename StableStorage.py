@@ -12,13 +12,11 @@ class StableStorage(Generic[T]):
         self.lock = threading.Lock()
 
     def __enter__(self):
-        # print("Acquire stable storage lock")
         self.lock.acquire()
         return self.load()
     
     def __exit__(self, exc_type, exc_value, traceback):
         self.lock.release()
-        # print("Release stable storage lock")
 
     def __id_from_addr(self, addr: Address):
         return f"{addr.ip}_{addr.port}"
