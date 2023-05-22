@@ -18,9 +18,13 @@ if __name__ == "__main__":
         if inp[0] == "exit":
             break
         else:
-            req = ExecuteReq({
-                "command": inp[0],
-                "value": " ".join(inp[1:])
-            })
-            resp = rpc_handler.request(server_addr, "execute", req)
-            print(resp)
+            if (inp[0] == "request_log"):
+                resp: ExecuteResp = rpc_handler.request(server_addr, "request_log", {})
+                print(resp)
+            else:
+                req = ExecuteReq({
+                    "command": inp[0],
+                    "value": " ".join(inp[1:])
+                })
+                resp = rpc_handler.request(server_addr, "execute", req)
+                print(resp)
